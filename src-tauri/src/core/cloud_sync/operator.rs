@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,16 +18,24 @@ use opendal::{
     OperationContext, Operator,
 };
 use rand::RngCore;
+use serde::Deserialize;
+use serde::de::{self, Deserializer};
 use sha2::Sha256;
 
 use crate::config::CloudSyncSettings;
 use crate::error::{AppError, AppResult};
 use crate::utils::url::normalize_storage_endpoint;
 
-use super::remote::remote_path;
+use super::remote::{SYNC_CURRENT_FILE, SYNC_LATEST_FILE, SYNC_SNAPSHOTS_DIR, remote_path};
 
 const GITEE_REMOTE_FILE_PREFIX: &str = "niceterm-";
 const GITEE_REMOTE_FILE_SUFFIX: &str = ".blob";
+const GITEE_SYNC_LATEST_FILENAME: &str = "niceterm-latest.redb";
+const GITEE_SYNC_CURRENT_FILENAME: &str = "niceterm-current.redb.enc";
+const GITEE_SYNC_SNAPSHOT_FILE_PREFIX: &str = "niceterm-snapshot-";
+const GITEE_SYNC_SNAPSHOT_FILE_SUFFIX: &str = ".redb.enc";
+const GITEE_README_FILENAME: &str = "niceterm-readme.txt";
+const GITEE_DEFAULT_API_ENDPOINT: &str = "https://gitee.com/api/v5";
 const GITEE_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 const GITHUB_GIST_API_ENDPOINT: &str = "https://api.github.com";
 const GITHUB_GIST_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -507,7 +515,7 @@ pub(super) struct GiteeSnippetRemote {
 
 #[derive(Debug, serde::Deserialize)]
 struct GiteeSnippet {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_gitee_files")]
     files: HashMap<String, GiteeSnippetFile>,
 }
 
@@ -521,7 +529,7 @@ struct GiteeSnippetFile {
 
 impl GiteeSnippetRemote {
     fn new(settings: &CloudSyncSettings) -> AppResult<Self> {
-        let api_endpoint = normalize_storage_endpoint(&settings.gitee_snippet.api_endpoint);
+        let api_endpoint = gitee_api_endpoint_or_default(&settings.gitee_snippet.api_endpoint);
         let gist_id = settings.gitee_snippet.gist_id.trim().to_string();
         let access_token = settings
             .gitee_snippet
@@ -536,9 +544,6 @@ impl GiteeSnippetRemote {
             return Err(AppError::Config(
                 "Gitee API endpoint is required".to_string(),
             ));
-        }
-        if gist_id.is_empty() {
-            return Err(AppError::Config("Gitee snippet ID is required".to_string()));
         }
 
         let client = reqwest::Client::builder()
@@ -556,28 +561,22 @@ impl GiteeSnippetRemote {
 
     async fn exists(&self, path: &str) -> AppResult<bool> {
         let snippet = self.fetch_snippet().await?;
-        Ok(snippet.files.contains_key(&gitee_remote_filename(path)))
+        Ok(gitee_remote_filenames(path)
+            .iter()
+            .any(|filename| snippet.files.contains_key(filename)))
     }
 
     async fn read_if_exists(&self, path: &str) -> AppResult<Option<Vec<u8>>> {
-        let filename = gitee_remote_filename(path);
-        if let Ok(content) = self.fetch_raw_filename(&filename).await {
+        let filenames = gitee_remote_filenames(path);
+        let snippet = self.fetch_snippet().await?;
+        for filename in filenames {
+            let Some(file) = snippet.files.get(&filename) else {
+                continue;
+            };
+            let content = self.fetch_file_content(&filename, file).await?;
             return decode_gitee_file_content(&content).map(Some);
         }
-
-        let snippet = self.fetch_snippet().await?;
-        let Some(file) = snippet.files.get(&filename) else {
-            return Ok(None);
-        };
-        let content = match file
-            .content
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(content) => content.to_string(),
-            None => self.fetch_raw_file(&filename, file).await?,
-        };
-        decode_gitee_file_content(&content).map(Some)
+        Ok(None)
     }
 
     async fn write(&self, path: &str, content: &[u8]) -> AppResult<()> {
@@ -592,12 +591,16 @@ impl GiteeSnippetRemote {
     async fn list_files(&self, path: &str) -> AppResult<Vec<String>> {
         let snippet = self.fetch_snippet().await?;
         let prefix = path.trim_start_matches('/');
-        Ok(snippet
-            .files
-            .keys()
-            .filter_map(|filename| gitee_remote_path(filename))
-            .filter(|remote_path| remote_path.starts_with(prefix))
-            .collect())
+        let mut paths = BTreeSet::new();
+        for filename in snippet.files.keys() {
+            let Some(remote_path) = gitee_remote_path(filename, path) else {
+                continue;
+            };
+            if remote_path.starts_with(prefix) {
+                paths.insert(remote_path);
+            }
+        }
+        Ok(paths.into_iter().collect())
     }
 
     async fn fetch_snippet(&self) -> AppResult<GiteeSnippet> {
@@ -612,17 +615,28 @@ impl GiteeSnippetRemote {
         decode_gitee_response(response).await
     }
 
-    async fn fetch_raw_file(&self, filename: &str, file: &GiteeSnippetFile) -> AppResult<String> {
-        let raw_url = file.raw_url.as_deref().filter(|value| !value.is_empty());
-        let url = raw_url.map(str::to_string).unwrap_or_else(|| {
-            format!(
-                "{}/gists/{}/raw/{}",
-                self.api_endpoint, self.gist_id, filename
-            )
-        });
+    async fn fetch_file_content(
+        &self,
+        filename: &str,
+        file: &GiteeSnippetFile,
+    ) -> AppResult<String> {
+        if let Some(content) = file
+            .content
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Ok(content.to_string());
+        }
+        if let Some(raw_url) = file.raw_url.as_deref().filter(|value| !value.is_empty()) {
+            return self.fetch_raw_file(raw_url).await;
+        }
+        self.fetch_raw_filename(filename).await
+    }
+
+    async fn fetch_raw_file(&self, raw_url: &str) -> AppResult<String> {
         let response = self
             .client
-            .get(url)
+            .get(raw_url)
             .query(&[("access_token", self.access_token.as_str())])
             .send()
             .await
@@ -676,7 +690,188 @@ impl GiteeSnippetRemote {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct GiteeSnippetCreated {
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum GiteeSnippetCreatePayload {
+    One(GiteeSnippetCreated),
+    Many(Vec<GiteeSnippetCreated>),
+}
+
+impl GiteeSnippetCreatePayload {
+    fn into_id(self) -> Option<String> {
+        match self {
+            Self::One(created) => non_empty_trimmed_string(created.id),
+            Self::Many(created) => created
+                .into_iter()
+                .find_map(|item| non_empty_trimmed_string(item.id)),
+        }
+    }
+}
+
+/// Resolves the snippet ID to sync with: a configured ID is used as-is when it
+/// is accessible, while an empty ID creates a fresh private snippet.
+pub(super) async fn resolve_gitee_snippet_id(
+    api_endpoint: &str,
+    access_token: &str,
+    existing_snippet_id: Option<String>,
+) -> AppResult<String> {
+    let api_endpoint = gitee_api_endpoint_or_default(api_endpoint);
+    let client = reqwest::Client::builder()
+        .timeout(GITEE_REMOTE_TIMEOUT)
+        .build()
+        .map_err(map_gitee_client_error)?;
+
+    if let Some(snippet_id) = existing_snippet_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if gitee_snippet_exists(&client, &api_endpoint, access_token, snippet_id).await? {
+            return Ok(snippet_id.to_string());
+        }
+        return Err(AppError::Config(format!(
+            "Configured Gitee snippet ID was not found or is not accessible: {snippet_id}"
+        )));
+    }
+
+    create_gitee_snippet(&client, &api_endpoint, access_token).await
+}
+
+async fn gitee_snippet_exists(
+    client: &reqwest::Client,
+    api_endpoint: &str,
+    access_token: &str,
+    snippet_id: &str,
+) -> AppResult<bool> {
+    let response = client
+        .get(format!("{api_endpoint}/gists/{snippet_id}"))
+        .query(&[("access_token", access_token)])
+        .send()
+        .await
+        .map_err(map_gitee_client_error)?;
+    let status = response.status();
+    let text = response.text().await.map_err(map_gitee_client_error)?;
+
+    if status.is_success() {
+        return Ok(true);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+
+    Err(AppError::Config(format!(
+        "Gitee snippet request failed ({status}): {}",
+        text.trim()
+    )))
+}
+
+async fn create_gitee_snippet(
+    client: &reqwest::Client,
+    api_endpoint: &str,
+    access_token: &str,
+) -> AppResult<String> {
+    let mut files = serde_json::Map::new();
+    files.insert(
+        GITEE_README_FILENAME.to_string(),
+        serde_json::json!({
+            "content": "This private snippet stores encrypted NiceTerm cloud sync objects."
+        }),
+    );
+    let body = serde_json::json!({
+        "access_token": access_token,
+        "description": "NiceTerm encrypted cloud sync storage",
+        "public": false,
+        "files": files,
+    });
+    let response = client
+        .post(format!("{api_endpoint}/gists"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(map_gitee_client_error)?;
+    let payload: GiteeSnippetCreatePayload = decode_gitee_response(response).await?;
+    payload
+        .into_id()
+        .ok_or_else(|| AppError::Config("Gitee snippet creation returned an empty ID".to_string()))
+}
+
 fn gitee_remote_filename(path: &str) -> String {
+    gitee_semantic_remote_filename(path).unwrap_or_else(|| gitee_legacy_remote_filename(path))
+}
+
+fn gitee_api_endpoint_or_default(api_endpoint: &str) -> String {
+    let normalized = normalize_storage_endpoint(api_endpoint);
+    if normalized.is_empty() {
+        GITEE_DEFAULT_API_ENDPOINT.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn gitee_remote_filenames(path: &str) -> Vec<String> {
+    let primary = gitee_remote_filename(path);
+    let legacy = gitee_legacy_remote_filename(path);
+    if primary == legacy {
+        vec![primary]
+    } else {
+        vec![primary, legacy]
+    }
+}
+
+fn gitee_semantic_remote_filename(path: &str) -> Option<String> {
+    let sync_path = gitee_sync_path(path)?;
+    if sync_path == SYNC_LATEST_FILE {
+        return Some(GITEE_SYNC_LATEST_FILENAME.to_string());
+    }
+    if sync_path == SYNC_CURRENT_FILE {
+        return Some(GITEE_SYNC_CURRENT_FILENAME.to_string());
+    }
+
+    let snapshot = sync_path.strip_prefix(SYNC_SNAPSHOTS_DIR)?;
+    let revision = snapshot.strip_suffix(".redb.enc")?;
+    if revision.is_empty() || revision.contains('/') || revision.contains('\\') {
+        return None;
+    }
+    Some(format!(
+        "{GITEE_SYNC_SNAPSHOT_FILE_PREFIX}{revision}{GITEE_SYNC_SNAPSHOT_FILE_SUFFIX}"
+    ))
+}
+
+fn gitee_sync_path(path: &str) -> Option<&str> {
+    let normalized = path.trim().trim_matches('/');
+    if normalized == SYNC_LATEST_FILE
+        || normalized == SYNC_CURRENT_FILE
+        || normalized.starts_with(SYNC_SNAPSHOTS_DIR)
+    {
+        return Some(normalized);
+    }
+
+    if normalized.ends_with(SYNC_LATEST_FILE)
+        && normalized
+            .strip_suffix(SYNC_LATEST_FILE)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+    {
+        return Some(SYNC_LATEST_FILE);
+    }
+    if normalized.ends_with(SYNC_CURRENT_FILE)
+        && normalized
+            .strip_suffix(SYNC_CURRENT_FILE)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+    {
+        return Some(SYNC_CURRENT_FILE);
+    }
+    normalized
+        .rfind("/sync/snapshots/")
+        .map(|index| &normalized[index + 1..])
+}
+
+fn gitee_legacy_remote_filename(path: &str) -> String {
     format!(
         "{}{}{}",
         GITEE_REMOTE_FILE_PREFIX,
@@ -685,7 +880,45 @@ fn gitee_remote_filename(path: &str) -> String {
     )
 }
 
-fn gitee_remote_path(filename: &str) -> Option<String> {
+fn gitee_remote_path(filename: &str, scope_path: &str) -> Option<String> {
+    if let Some(sync_path) = gitee_semantic_remote_path(filename) {
+        return Some(gitee_scoped_remote_path(scope_path, &sync_path));
+    }
+    gitee_legacy_remote_path(filename)
+}
+
+fn gitee_semantic_remote_path(filename: &str) -> Option<String> {
+    if filename == GITEE_SYNC_LATEST_FILENAME {
+        return Some(SYNC_LATEST_FILE.to_string());
+    }
+    if filename == GITEE_SYNC_CURRENT_FILENAME {
+        return Some(SYNC_CURRENT_FILE.to_string());
+    }
+
+    let revision = filename
+        .strip_prefix(GITEE_SYNC_SNAPSHOT_FILE_PREFIX)?
+        .strip_suffix(GITEE_SYNC_SNAPSHOT_FILE_SUFFIX)?;
+    if revision.is_empty() || revision.contains('/') || revision.contains('\\') {
+        return None;
+    }
+    Some(format!("{SYNC_SNAPSHOTS_DIR}{revision}.redb.enc"))
+}
+
+fn gitee_scoped_remote_path(scope_path: &str, sync_path: &str) -> String {
+    let scope = scope_path.trim().trim_matches('/');
+    if scope.is_empty() || scope == "sync" || scope.starts_with("sync/") {
+        return sync_path.to_string();
+    }
+    if let Some(index) = scope.rfind("/sync") {
+        let suffix = &scope[index..];
+        if suffix == "/sync" || suffix.starts_with("/sync/") {
+            return remote_path(&scope[..index], sync_path);
+        }
+    }
+    remote_path(scope, sync_path)
+}
+
+fn gitee_legacy_remote_path(filename: &str) -> Option<String> {
     let encoded = filename
         .strip_prefix(GITEE_REMOTE_FILE_PREFIX)?
         .strip_suffix(GITEE_REMOTE_FILE_SUFFIX)?;
@@ -701,6 +934,61 @@ fn gitee_patch_body(
         "access_token": access_token,
         "files": files,
     })
+}
+
+fn non_empty_trimmed_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn deserialize_gitee_files<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, GiteeSnippetFile>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    parse_gitee_files_value(value).map_err(de::Error::custom)
+}
+
+fn parse_gitee_files_value(
+    value: serde_json::Value,
+) -> Result<HashMap<String, GiteeSnippetFile>, serde_json::Error> {
+    match value {
+        serde_json::Value::Object(files) => {
+            let mut parsed = HashMap::new();
+            for (filename, value) in files {
+                if let Some(file) = parse_gitee_file_value(value)? {
+                    parsed.insert(filename, file);
+                }
+            }
+            Ok(parsed)
+        }
+        serde_json::Value::String(raw) if raw.trim().is_empty() => Ok(HashMap::new()),
+        serde_json::Value::String(raw) => {
+            let value = serde_json::from_str(&raw)?;
+            parse_gitee_files_value(value)
+        }
+        serde_json::Value::Null => Ok(HashMap::new()),
+        other => serde_json::from_value(other),
+    }
+}
+
+fn parse_gitee_file_value(
+    value: serde_json::Value,
+) -> Result<Option<GiteeSnippetFile>, serde_json::Error> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(content) => Ok(Some(GiteeSnippetFile {
+            content: Some(content),
+            raw_url: None,
+        })),
+        other => serde_json::from_value(other).map(Some),
+    }
 }
 
 fn decode_gitee_file_content(content: &str) -> AppResult<Vec<u8>> {
@@ -1310,20 +1598,66 @@ mod tests {
     }
 
     #[test]
-    fn gitee_remote_filename_is_path_safe() {
-        let filename = gitee_remote_filename("niceterm/sync/latest.redb");
+    fn gitee_remote_filename_uses_readable_sync_names() {
+        assert_eq!(
+            gitee_remote_filename("niceterm/sync/latest.redb"),
+            GITEE_SYNC_LATEST_FILENAME
+        );
+        assert_eq!(
+            gitee_remote_filename("niceterm/sync/current.redb.enc"),
+            GITEE_SYNC_CURRENT_FILENAME
+        );
+        assert_eq!(
+            gitee_remote_filename("niceterm/sync/snapshots/rev.redb.enc"),
+            "niceterm-snapshot-rev.redb.enc"
+        );
+    }
+
+    #[test]
+    fn gitee_remote_path_roundtrips_readable_sync_names_with_scope() {
+        let path = "niceterm/sync/snapshots/rev.redb.enc";
+        let filename = gitee_remote_filename(path);
+
+        assert_eq!(
+            gitee_remote_path(&filename, "niceterm/sync/snapshots/").as_deref(),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn gitee_remote_filename_keeps_legacy_fallback_for_unknown_paths() {
+        let path = "niceterm/custom/object.bin";
+        let filename = gitee_remote_filename(path);
 
         assert!(filename.starts_with(GITEE_REMOTE_FILE_PREFIX));
         assert!(filename.ends_with(GITEE_REMOTE_FILE_SUFFIX));
         assert!(!filename.contains('/'));
+        assert_eq!(
+            gitee_remote_path(&filename, "niceterm").as_deref(),
+            Some(path)
+        );
     }
 
     #[test]
-    fn gitee_remote_filename_roundtrips_path() {
-        let path = "niceterm/sync/snapshots/rev.redb.enc";
-        let filename = gitee_remote_filename(path);
+    fn gitee_remote_filenames_include_legacy_name_for_reads() {
+        let path = "niceterm/sync/current.redb.enc";
+        let filenames = gitee_remote_filenames(path);
 
-        assert_eq!(gitee_remote_path(&filename).as_deref(), Some(path));
+        assert_eq!(filenames[0], GITEE_SYNC_CURRENT_FILENAME);
+        assert!(filenames[1].starts_with(GITEE_REMOTE_FILE_PREFIX));
+        assert!(filenames[1].ends_with(GITEE_REMOTE_FILE_SUFFIX));
+    }
+
+    #[test]
+    fn gitee_api_endpoint_uses_default_when_empty() {
+        assert_eq!(
+            gitee_api_endpoint_or_default(""),
+            GITEE_DEFAULT_API_ENDPOINT
+        );
+        assert_eq!(
+            gitee_api_endpoint_or_default("https://gitee.com/api/v5/"),
+            GITEE_DEFAULT_API_ENDPOINT
+        );
     }
 
     #[test]
@@ -1367,14 +1701,54 @@ mod tests {
     }
 
     #[test]
-    fn gitee_delete_patch_body_marks_file_as_null() {
+    fn gitee_patch_body_marks_deleted_file_as_null() {
         let filename = gitee_remote_filename("niceterm/sync/snapshots/rev.redb.enc");
         let mut files = serde_json::Map::new();
         files.insert(filename.clone(), serde_json::Value::Null);
+
         let body = gitee_patch_body("token", files);
 
         assert_eq!(body["access_token"], "token");
         assert!(body["files"][filename].is_null());
+    }
+
+    #[test]
+    fn gitee_snippet_deserializes_files_from_object() {
+        let snippet: GiteeSnippet = serde_json::from_str(
+            r#"{"files":{"niceterm-current.redb.enc":{"content":"YQ==","raw_url":"https://example.com/raw"}}}"#,
+        )
+        .expect("deserialize Gitee snippet");
+        let file = snippet
+            .files
+            .get(GITEE_SYNC_CURRENT_FILENAME)
+            .expect("current file");
+
+        assert_eq!(file.content.as_deref(), Some("YQ=="));
+        assert_eq!(file.raw_url.as_deref(), Some("https://example.com/raw"));
+    }
+
+    #[test]
+    fn gitee_snippet_deserializes_files_from_json_string() {
+        let snippet: GiteeSnippet = serde_json::from_str(
+            r#"{"files":"{\"niceterm-current.redb.enc\":{\"content\":\"YQ==\"}}"}"#,
+        )
+        .expect("deserialize Gitee snippet");
+
+        assert_eq!(
+            snippet
+                .files
+                .get(GITEE_SYNC_CURRENT_FILENAME)
+                .and_then(|file| file.content.as_deref()),
+            Some("YQ==")
+        );
+    }
+
+    #[test]
+    fn gitee_snippet_create_payload_accepts_array_response() {
+        let payload: GiteeSnippetCreatePayload =
+            serde_json::from_str(r#"[{"id":" snippet-id "}]"#).expect("deserialize payload");
+
+        assert_eq!(payload.into_id().as_deref(), Some("snippet-id"));
     }
 
     #[test]

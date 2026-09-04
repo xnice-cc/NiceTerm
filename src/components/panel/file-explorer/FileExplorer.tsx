@@ -133,11 +133,11 @@ import {
   clearTreeChildrenForSession,
   collapseToAncestors,
   flattenFileTree,
-  getAncestorPaths,
   getEntryTreePath,
   getFilesystemTop,
   getTreeChildren,
   reconcileRestoredChildrenCache,
+  resolveRevealTreeRoot,
   setTreeChildren,
   withTreePath,
   type TreeChildrenCache,
@@ -148,6 +148,14 @@ const MemoizedFileExplorer = memo(FileExplorer);
 
 /** Stable empty array so memoized rows skip re-render for directory rows. */
 const EMPTY_AI_ACTIONS: AICustomActionConfig[] = [];
+const CURRENT_DIRECTORY_ANCHOR_ROW = 2;
+
+function getAnchoredTreeScrollTop(nodeIndex: number) {
+  return Math.max(
+    0,
+    (nodeIndex - CURRENT_DIRECTORY_ANCHOR_ROW) * FILE_LIST_ITEM_HEIGHT,
+  );
+}
 
 export default MemoizedFileExplorer;
 
@@ -805,15 +813,12 @@ function FileExplorerPane({
 
   const sessionCacheRef = useRef(fileExplorerSessionCacheStore);
   const prevSessionIdRef = useRef<string | null>(null);
-  const pendingScrollRestoreRef = useRef<{
-    sessionId: string;
-    scrollTop: number;
-  } | null>(null);
   const autoSyncCwdMountSyncKeyRef = useRef<string | null>(null);
   const [isExternalDropActive, setIsExternalDropActive] = useState(false);
   const [externalDropDirPath, setExternalDropDirPath] = useState<string | null>(null);
   const [listScrollTop, setListScrollTop] = useState(0);
   const [listViewportHeight, setListViewportHeight] = useState(0);
+  const [revealRequestId, setRevealRequestId] = useState(0);
   const refreshUploadCompletionTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
@@ -832,6 +837,16 @@ function FileExplorerPane({
   const resetExternalDropHover = useCallback(() => {
     setIsExternalDropActive(false);
     setExternalDropDirPath(null);
+  }, []);
+
+  const requestRevealPathPlacement = useCallback((path: string) => {
+    const normalizedPath = normalizeExplorerPath(
+      path,
+      explorerBackendRef.current,
+    );
+    if (!normalizedPath) return;
+    pendingRevealPathRef.current = normalizedPath;
+    setRevealRequestId((current) => current + 1);
   }, []);
 
   // External drag: resolve which directory row (if any) sits under the drop
@@ -925,8 +940,8 @@ function FileExplorerPane({
   const showHiddenFiles =
     appSettings.ui.file_explorer_show_hidden_files ?? true;
   // Tree mode: only reset the list scroll when the tree root changes.
-  // Switching sessions restores the scroll position saved for that session
-  // instead of resetting it; reveal handles its own targeted scrolling.
+  // Session switches and refreshes explicitly place the current directory
+  // near the top of the viewport for easier browsing.
   const listScrollResetKey = treeRootPath;
   const listFilterResetKey = `${fileSearchQuery}:${fileSortMode.column}:${fileSortMode.direction}`;
   const activeConnection = useMemo(
@@ -1020,7 +1035,7 @@ function FileExplorerPane({
     };
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!listScrollResetKey && !listContainerRef.current) {
       setListScrollTop(0);
       return;
@@ -1351,15 +1366,16 @@ function FileExplorerPane({
       const token = ++revealTokenRef.current;
       const historyMode = options?.history ?? "push";
 
-      let rootPath =
-        normalizeExplorerPath(treeRootPathRef.current, backend) || targetPath;
-      let chain = getAncestorPaths(rootPath, targetPath, backend);
-      if (!chain) {
-        // Target outside the current root: re-root the tree at the target.
-        rootPath = targetPath;
-        chain = [targetPath];
-        setTreeRootPath(targetPath);
-        treeRootPathRef.current = targetPath;
+      const resolvedRoot = resolveRevealTreeRoot({
+        targetPath,
+        backend,
+        preferredRootPaths: [treeRootPathRef.current],
+      });
+      if (!resolvedRoot) return false;
+      const { rootPath, chain } = resolvedRoot;
+      if (rootPath !== normalizeExplorerPath(treeRootPathRef.current, backend)) {
+        setTreeRootPath(rootPath);
+        treeRootPathRef.current = rootPath;
       }
 
       for (const dir of chain) {
@@ -1393,16 +1409,23 @@ function FileExplorerPane({
           visitedHistoryRef.current,
           targetPath,
           backend,
-        );
+          );
         visitedHistoryRef.current = nextVisitedHistory;
         setVisitedHistory(nextVisitedHistory);
       }
+      currentPathRef.current = targetPath;
       setCurrentPath(targetPath);
       setHighlightPath(options?.highlight === false ? null : targetPath);
-      pendingRevealPathRef.current = targetPath;
+      requestRevealPathPlacement(targetPath);
       return true;
     },
-    [activeSessionId, canBrowseFiles, loadTreeChildren, pushDirectoryHistory],
+    [
+      activeSessionId,
+      canBrowseFiles,
+      loadTreeChildren,
+      pushDirectoryHistory,
+      requestRevealPathPlacement,
+    ],
   );
 
   const toggleNodeExpand = useCallback(
@@ -1447,9 +1470,19 @@ function FileExplorerPane({
         history: "preserve",
         expand: false,
         silent: true,
+      }).then((loaded) => {
+        const current = normalizeExplorerPath(currentPathRef.current, backend);
+        if (current && normalizedPath === current) {
+          requestRevealPathPlacement(current);
+        }
+        return loaded;
       });
     },
-    [invalidateDirectoryChildrenCache, loadTreeChildren],
+    [
+      invalidateDirectoryChildrenCache,
+      loadTreeChildren,
+      requestRevealPathPlacement,
+    ],
   );
 
   const refreshVisibleTree = useCallback(() => {
@@ -1475,9 +1508,16 @@ function FileExplorerPane({
         });
         lastLoaded = loaded || lastLoaded;
       }
+      if (current) {
+        requestRevealPathPlacement(current);
+      }
       return lastLoaded;
     })();
-  }, [invalidateDirectoryChildrenCache, loadTreeChildren]);
+  }, [
+    invalidateDirectoryChildrenCache,
+    loadTreeChildren,
+    requestRevealPathPlacement,
+  ]);
 
   const uploadLocalEntriesToTarget = useCallback(
     (
@@ -1582,14 +1622,21 @@ function FileExplorerPane({
     prevSessionIdRef.current = activeSessionId;
 
     if (!canBrowseFiles || !activeSessionId) {
-      pendingScrollRestoreRef.current = null;
-      setChildrenCache(new Map());
+      pendingRevealPathRef.current = null;
+      const emptyChildrenCache = new Map();
+      const emptyExpandedPaths = new Set<string>();
+      setChildrenCache(emptyChildrenCache);
+      childrenCacheRef.current = emptyChildrenCache;
       setTreeRootPath("");
-      setExpandedPaths(new Set());
+      treeRootPathRef.current = "";
+      setExpandedPaths(emptyExpandedPaths);
+      expandedPathsRef.current = emptyExpandedPaths;
       setLoadingDirPaths(new Set());
       setHighlightPath(null);
       setCurrentPath("");
+      currentPathRef.current = "";
       setHomeDir("");
+      homeDirRef.current = "";
       setError(null);
       setDirectoryLoading(false);
       setSelectedFiles(new Set());
@@ -1618,11 +1665,24 @@ function FileExplorerPane({
         childrenCacheRef.current = restoredChildrenCache;
         setChildrenCache(restoredChildrenCache);
       }
+      const restoredRevealRoot = resolveRevealTreeRoot({
+        targetPath: cached.currentPath,
+        backend,
+        preferredRootPaths: [cached.treeRootPath, cached.homeDir],
+      });
       const restoredRoot =
-        cached.treeRootPath || cached.homeDir || cached.currentPath;
+        restoredRevealRoot?.rootPath ||
+        cached.treeRootPath ||
+        cached.homeDir ||
+        cached.currentPath;
       setTreeRootPath(restoredRoot);
       treeRootPathRef.current = restoredRoot;
       const restoredExpandedPaths = new Set(cached.expandedPaths ?? []);
+      if (restoredRevealRoot) {
+        for (const dir of restoredRevealRoot.chain) {
+          restoredExpandedPaths.add(dir);
+        }
+      }
       const currentExpandedPaths = expandedPathsRef.current;
       let expandedPathsUnchanged =
         currentExpandedPaths.size === restoredExpandedPaths.size;
@@ -1637,8 +1697,11 @@ function FileExplorerPane({
       if (!expandedPathsUnchanged) {
         setExpandedPaths(restoredExpandedPaths);
       }
+      expandedPathsRef.current = restoredExpandedPaths;
       setCurrentPath(cached.currentPath);
+      currentPathRef.current = cached.currentPath;
       setHomeDir(cached.homeDir);
+      homeDirRef.current = cached.homeDir;
       setSelectedFiles((prev) => (prev.size === 0 ? prev : new Set()));
       setError(null);
       historyRef.current = [...cached.history];
@@ -1655,10 +1718,10 @@ function FileExplorerPane({
       }
       lastSelectedRef.current = null;
       if (prevId !== activeSessionId) {
-        pendingScrollRestoreRef.current = {
-          sessionId: activeSessionId,
-          scrollTop: cached.scrollTop ?? 0,
-        };
+        void revealPathInTree(cached.currentPath, {
+          history: "preserve",
+          highlight: false,
+        });
       }
       if (!restoredChildrenCache.has(restoredRoot)) {
         void loadTreeChildren(restoredRoot);
@@ -1666,7 +1729,7 @@ function FileExplorerPane({
       return;
     }
 
-    pendingScrollRestoreRef.current = null;
+    pendingRevealPathRef.current = null;
     historyRef.current = [];
     historyIndexRef.current = -1;
     visitedHistoryRef.current = [];
@@ -1675,13 +1738,21 @@ function FileExplorerPane({
     setSelectedFiles(new Set());
     setChildrenCache(new Map());
     childrenCacheRef.current = new Map();
+    setTreeRootPath("");
+    treeRootPathRef.current = "";
     setExpandedPaths(new Set());
+    expandedPathsRef.current = new Set();
+    setCurrentPath("");
+    currentPathRef.current = "";
+    setHomeDir("");
+    homeDirRef.current = "";
 
     let cancelled = false;
     (async () => {
       const adoptTreeRoot = async (rootPath: string) => {
         setTreeRootPath(rootPath);
         treeRootPathRef.current = rootPath;
+        currentPathRef.current = rootPath;
         setCurrentPath(rootPath);
         setDirectoryLoading(true);
         const loaded = await loadTreeChildren(rootPath);
@@ -1746,31 +1817,13 @@ function FileExplorerPane({
     buildTreeSessionSnapshot,
     canBrowseFiles,
     loadTreeChildren,
+    revealPathInTree,
     resetExternalDropHover,
   ]);
 
-  // Apply the scroll position saved for the restored session once its
-  // listing is actually on screen. Session switches go through a resolving
-  // window (browser availability) and fresh loads go through a loading
-  // state; the scroll must only be applied when real rows are rendered.
-  useLayoutEffect(() => {
-    const pending = pendingScrollRestoreRef.current;
-    if (!pending || pending.sessionId !== activeSessionId) return;
-    if (
-      directoryLoading ||
-      isResolvingRemoteFileBrowser ||
-      hasRemoteFileBrowserDisabled
-    ) {
-      return;
-    }
-    const container = listContainerRef.current;
-    if (!container) return;
-    pendingScrollRestoreRef.current = null;
-    container.scrollTop = pending.scrollTop;
-    setListScrollTop(container.scrollTop);
-  });
-
   useEffect(() => {
+    // Triggers the first CWD check after the restored/current path commits.
+    void currentPath;
     if (!activeSessionId) {
       autoSyncCwdMountSyncKeyRef.current = null;
       return;
@@ -1781,20 +1834,13 @@ function FileExplorerPane({
       return;
     }
 
-    if (!canBrowseFiles || !currentPath) {
+    const visibleCurrentPath = currentPathRef.current;
+    if (!canBrowseFiles || !visibleCurrentPath) {
       return;
     }
 
     const syncKey = `${activeSessionId}:${autoSyncScopeId ?? ""}:${explorerBackend}`;
     if (autoSyncCwdMountSyncKeyRef.current === syncKey) {
-      return;
-    }
-
-    // A session restored from its snapshot keeps the directory the user was
-    // browsing; mount-time cwd sync would jump the tree back to the
-    // terminal's home. Live cwd-changed events still sync afterwards.
-    if (sessionCacheRef.current.get(activeSessionId)) {
-      autoSyncCwdMountSyncKeyRef.current = syncKey;
       return;
     }
 
@@ -1805,7 +1851,7 @@ function FileExplorerPane({
       canBrowseFiles,
       sessionId: activeSessionId,
       backend: explorerBackend,
-      currentPath,
+      currentPath: visibleCurrentPath,
       readTerminalCwd: (sessionId) =>
         invoke<string | null>("try_get_terminal_cwd", { sessionId }),
       loadDirectory: (path, options) =>
@@ -2215,7 +2261,9 @@ function FileExplorerPane({
 
     if (entry.is_dir) {
       setHighlightPath(null);
+      currentPathRef.current = nodePath;
       setCurrentPath(nodePath);
+      requestRevealPathPlacement(nodePath);
       setSelectedFiles((prev) => (prev.has(nodePath) ? prev : new Set([nodePath])));
       lastSelectedRef.current = nodePath;
       // Activating a directory expands it when collapsed (never collapses).
@@ -2225,7 +2273,9 @@ function FileExplorerPane({
       return;
     }
 
-    setCurrentPath(getExplorerParentDirectory(nodePath, backend));
+    const parentPath = getExplorerParentDirectory(nodePath, backend);
+    currentPathRef.current = parentPath;
+    setCurrentPath(parentPath);
     setSelectedFiles(new Set([nodePath]));
     lastSelectedRef.current = nodePath;
   };
@@ -2469,8 +2519,9 @@ function FileExplorerPane({
             event.stopPropagation();
             setSelectedFiles(new Set([parentPath]));
             lastSelectedRef.current = parentPath;
+            currentPathRef.current = parentPath;
             setCurrentPath(parentPath);
-            pendingRevealPathRef.current = parentPath;
+            requestRevealPathPlacement(parentPath);
           }
         }
       }
@@ -2798,7 +2849,7 @@ function FileExplorerPane({
       });
       setSelectedFiles(new Set([newPath]));
       lastSelectedRef.current = newPath;
-      pendingRevealPathRef.current = newPath;
+      requestRevealPathPlacement(newPath);
       setInlineRenameState(null);
     } catch (e) {
       toast.error(String(e));
@@ -2813,6 +2864,7 @@ function FileExplorerPane({
     inlineRenameState,
     invalidateDirectoryChildrenCache,
     loadTreeChildren,
+    requestRevealPathPlacement,
   ]);
 
   const handleFileAIAction = async (
@@ -3438,7 +3490,9 @@ function FileExplorerPane({
     return { top, bottom };
   }, [treeNodes, visibleNodes]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Used as an explicit placement trigger even when treeNodes is unchanged.
+    void revealRequestId;
     const revealPath = pendingRevealPathRef.current;
     const container = listContainerRef.current;
     if (!revealPath || !container) {
@@ -3451,22 +3505,13 @@ function FileExplorerPane({
     }
 
     pendingRevealPathRef.current = null;
-    const nextScrollTop = Math.max(
-      0,
-      nodeIndex * FILE_LIST_ITEM_HEIGHT - FILE_LIST_ITEM_HEIGHT,
-    );
-    const frame = window.requestAnimationFrame(() => {
-      container.scrollTop = nextScrollTop;
-      setListScrollTop(container.scrollTop);
-    });
+    const nextScrollTop = getAnchoredTreeScrollTop(nodeIndex);
+    container.scrollTop = nextScrollTop;
+    setListScrollTop(container.scrollTop);
+  }, [revealRequestId, treeNodes]);
 
-    return () => window.cancelAnimationFrame(frame);
-  }, [treeNodes]);
-
-  // Keep the current directory's row visible after navigation: when the
-  // current path changes (or new children push it out of view), scroll the
-  // least amount needed to bring its row back into the viewport instead of
-  // resetting to the top.
+  // Fallback for direct current path changes that do not go through the
+  // placement request path.
   const lastCurrentPathForViewRef = useRef<string | null>(null);
   useEffect(() => {
     const targetPath = currentPath || null;

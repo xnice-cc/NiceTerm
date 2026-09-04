@@ -8,6 +8,7 @@ import {
   getAncestorPaths,
   getFilesystemTop,
   getTreeChildren,
+  resolveRevealTreeRoot,
   setTreeChildren,
 } from "./treeModel";
 import type { FileSortMode } from "./model";
@@ -174,6 +175,60 @@ describe("getFilesystemTop", () => {
     expect(getFilesystemTop("\\\\server\\share\\docs", "local")).toBe(
       "\\\\server\\share",
     );
+  });
+});
+
+describe("resolveRevealTreeRoot", () => {
+  it("keeps a preferred root when the target can render below it", () => {
+    expect(
+      resolveRevealTreeRoot({
+        targetPath: "/home/user/projects",
+        backend: "remote",
+        preferredRootPaths: ["/home/user"],
+      }),
+    ).toEqual({
+      rootPath: "/home/user",
+      chain: ["/home/user", "/home/user/projects"],
+    });
+  });
+
+  it("uses the filesystem top when a cached root equals the target directory", () => {
+    expect(
+      resolveRevealTreeRoot({
+        targetPath: "/home/user/projects",
+        backend: "remote",
+        preferredRootPaths: ["/home/user/projects"],
+      }),
+    ).toEqual({
+      rootPath: "/",
+      chain: ["/", "/home", "/home/user", "/home/user/projects"],
+    });
+  });
+
+  it("uses the filesystem top when the target is outside the preferred root", () => {
+    expect(
+      resolveRevealTreeRoot({
+        targetPath: "/etc",
+        backend: "remote",
+        preferredRootPaths: ["/home/user"],
+      }),
+    ).toEqual({
+      rootPath: "/",
+      chain: ["/", "/etc"],
+    });
+  });
+
+  it("keeps local drive roots for Windows paths", () => {
+    expect(
+      resolveRevealTreeRoot({
+        targetPath: "C:\\Users\\dev\\project",
+        backend: "local",
+        preferredRootPaths: ["C:\\Users\\dev\\project"],
+      }),
+    ).toEqual({
+      rootPath: "C:\\",
+      chain: ["C:\\", "C:\\Users", "C:\\Users\\dev", "C:\\Users\\dev\\project"],
+    });
   });
 });
 

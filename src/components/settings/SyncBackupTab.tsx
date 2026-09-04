@@ -56,10 +56,6 @@ function getValidationMessage(
       return t("settings.s3BucketRequired");
     case "s3CredentialsIncomplete":
       return t("settings.s3CredentialsIncomplete");
-    case "giteeSnippetEndpointRequired":
-      return t("settings.giteeSnippetEndpointRequired");
-    case "giteeSnippetIdRequired":
-      return t("settings.giteeSnippetIdRequired");
     case "giteeSnippetTokenRequired":
       return t("settings.giteeSnippetTokenRequired");
     case "driveRefreshTokenRequired":
@@ -68,8 +64,6 @@ function getValidationMessage(
       return t("settings.driveClientIdRequired");
     case "driveClientSecretRequired":
       return t("settings.driveClientSecretRequired");
-    case "githubGistRequired":
-      return t("settings.githubGistRequired");
     case "githubGistTokenRequired":
       return t("settings.githubGistTokenRequired");
   }
@@ -720,32 +714,6 @@ export function SyncBackupTab({ onNavigateSecurity }: SyncBackupTabProps) {
         ) : settings.provider === "gitee_snippet" ? (
           <SettingFieldGrid>
             <SettingInput
-              label={t("settings.giteeSnippetApiEndpoint")}
-              desc={t("settings.giteeSnippetApiEndpointDesc")}
-              value={settings.gitee_snippet.api_endpoint}
-              placeholder="https://gitee.com/api/v5"
-              disabled={formDisabled}
-              onChange={(event) =>
-                updateCloudSync({
-                  gitee_snippet: {
-                    ...settings.gitee_snippet,
-                    api_endpoint: event.target.value,
-                  },
-                })
-              }
-            />
-            <SettingInput
-              label={t("settings.giteeSnippetId")}
-              desc={t("settings.giteeSnippetIdDesc")}
-              value={settings.gitee_snippet.gist_id}
-              disabled={formDisabled}
-              onChange={(event) =>
-                updateCloudSync({
-                  gitee_snippet: { ...settings.gitee_snippet, gist_id: event.target.value },
-                })
-              }
-            />
-            <SettingInput
               label={t("settings.giteeSnippetAccessToken")}
               desc={t("settings.giteeSnippetAccessTokenDesc")}
               type="password"
@@ -759,7 +727,25 @@ export function SyncBackupTab({ onNavigateSecurity }: SyncBackupTabProps) {
                 updateCloudSync({
                   gitee_snippet: {
                     ...settings.gitee_snippet,
+                    // Keep the default API endpoint unless it was customized.
+                    api_endpoint:
+                      settings.gitee_snippet.api_endpoint.trim() ||
+                      "https://gitee.com/api/v5",
                     access_token: event.target.value,
+                  },
+                })
+              }
+            />
+            <SettingInput
+              label={t("settings.giteeSnippetId")}
+              desc={t("settings.giteeSnippetIdDesc")}
+              value={settings.gitee_snippet.gist_id}
+              disabled={formDisabled}
+              onChange={(event) =>
+                updateCloudSync({
+                  gitee_snippet: {
+                    ...settings.gitee_snippet,
+                    gist_id: event.target.value,
                   },
                 })
               }
@@ -768,16 +754,39 @@ export function SyncBackupTab({ onNavigateSecurity }: SyncBackupTabProps) {
         ) : settings.provider === "github_gist" ? (
           <SettingFieldGrid>
             <SettingInput
-              label={t("settings.githubGistId")}
-              desc={t("settings.githubGistIdDesc")}
-              value={settings.github_gist.gist_id}
-              disabled={formDisabled || githubAuth.flow !== null}
-              onChange={(event) =>
+              label={t("settings.githubGistAccessToken")}
+              desc={t("settings.githubGistAccessTokenDesc")}
+              type="password"
+              value={secretInputValue(settings.github_gist.access_token)}
+              placeholder={secretPlaceholder(
+                settings.github_gist.access_token,
+                t("settings.githubGistAccessToken"),
+              )}
+              disabled={formDisabled}
+              onChange={(event) => {
                 updateCloudSync({
-                  github_gist: { ...settings.github_gist, gist_id: event.target.value },
-                })
-              }
+                  github_gist: {
+                    ...settings.github_gist,
+                    access_token: event.target.value,
+                  },
+                });
+                setGithubAuth((current) => ({
+                  ...current,
+                  login: null,
+                  message: null,
+                }));
+              }}
             />
+            {settings.github_gist.gist_id ? (
+              <SettingRow
+                label={t("settings.githubGistId")}
+                desc={t("settings.githubGistIdAutoDesc")}
+              >
+                <code className="max-w-full truncate rounded bg-muted px-2 py-1 text-xs text-muted-foreground">
+                  {settings.github_gist.gist_id}
+                </code>
+              </SettingRow>
+            ) : null}
             <SettingRow
               label={t("settings.githubGistAuth")}
               desc={t("settings.githubGistAuthDesc")}

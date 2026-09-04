@@ -367,6 +367,59 @@ export function getAncestorPaths(
   return [root, ...chain];
 }
 
+function canRenderRevealTargetUnderRoot(
+  rootPath: string,
+  targetPath: string,
+  backend: FileExplorerBackendKind,
+): string[] | null {
+  const chain = getAncestorPaths(rootPath, targetPath, backend);
+  if (!chain) return null;
+  if (chain.length > 1) return chain;
+
+  const normalizedTarget = normalizeExplorerPath(targetPath, backend);
+  const parent = getExplorerParentDirectory(normalizedTarget, backend);
+  return parent === normalizedTarget ? chain : null;
+}
+
+export interface ResolveRevealTreeRootParams {
+  targetPath: string;
+  backend: FileExplorerBackendKind;
+  preferredRootPaths?: Array<string | null | undefined>;
+}
+
+/**
+ * Chooses a tree root that allows the target directory to appear as a row.
+ * The root itself is not rendered by flattenFileTree, so a non-root target
+ * cannot also be the tree root when we need to reveal it.
+ */
+export function resolveRevealTreeRoot({
+  targetPath,
+  backend,
+  preferredRootPaths = [],
+}: ResolveRevealTreeRootParams): { rootPath: string; chain: string[] } | null {
+  const target = normalizeExplorerPath(targetPath, backend);
+  if (!target) return null;
+
+  for (const preferredRootPath of preferredRootPaths) {
+    const preferredRoot = normalizeExplorerPath(preferredRootPath ?? "", backend);
+    if (!preferredRoot) continue;
+    const chain = canRenderRevealTargetUnderRoot(
+      preferredRoot,
+      target,
+      backend,
+    );
+    if (chain) {
+      return { rootPath: preferredRoot, chain };
+    }
+  }
+
+  const fallbackRoot = getFilesystemTop(target, backend) || target;
+  return {
+    rootPath: fallbackRoot,
+    chain: getAncestorPaths(fallbackRoot, target, backend) ?? [target],
+  };
+}
+
 /** Expansion set that keeps only the path to one target directory. */
 export function collapseToAncestors(ancestors: string[]): Set<string> {
   return new Set(ancestors);

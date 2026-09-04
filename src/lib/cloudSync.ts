@@ -5,13 +5,10 @@ export type CloudSyncValidationCode =
   | "s3EndpointRequired"
   | "s3BucketRequired"
   | "s3CredentialsIncomplete"
-  | "giteeSnippetEndpointRequired"
-  | "giteeSnippetIdRequired"
   | "giteeSnippetTokenRequired"
   | "driveRefreshTokenRequired"
   | "driveClientIdRequired"
   | "driveClientSecretRequired"
-  | "githubGistRequired"
   | "githubGistTokenRequired";
 
 export const MASKED_CLOUD_SECRET_VALUE = "__SET__";
@@ -130,14 +127,8 @@ export function getCloudSyncValidationErrors(
   }
 
   if (settings.provider === "gitee_snippet") {
-    if (settings.gitee_snippet.api_endpoint.trim().length === 0) {
-      errors.push("giteeSnippetEndpointRequired");
-    }
-
-    if (settings.gitee_snippet.gist_id.trim().length === 0) {
-      errors.push("giteeSnippetIdRequired");
-    }
-
+    // Snippet ID is optional: the backend auto-creates a private snippet on
+    // first sync when the ID is empty or no longer accessible.
     if (!settings.gitee_snippet.access_token?.trim()) {
       errors.push("giteeSnippetTokenRequired");
     }
@@ -156,10 +147,8 @@ export function getCloudSyncValidationErrors(
   }
 
   if (settings.provider === "github_gist") {
-    if (settings.github_gist.gist_id.trim().length === 0) {
-      errors.push("githubGistRequired");
-    }
-
+    // Gist ID is optional: the backend creates/reuses one automatically, and
+    // the device-flow login fills it in after authorization.
     if (!settings.github_gist.access_token?.trim()) {
       errors.push("githubGistTokenRequired");
     }

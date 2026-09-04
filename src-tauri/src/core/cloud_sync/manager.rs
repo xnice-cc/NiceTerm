@@ -1324,6 +1324,39 @@ impl CloudSyncManager {
         &self,
         mut settings: CloudSyncSettings,
     ) -> AppResult<super::operator::CloudRemote> {
+        if settings.provider == "gitee_snippet" {
+            let Some(access_token) = settings
+                .gitee_snippet
+                .access_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return build_remote(&settings);
+            };
+
+            let existing_snippet_id = settings.gitee_snippet.gist_id.clone();
+            let resolved_snippet_id = super::operator::resolve_gitee_snippet_id(
+                &settings.gitee_snippet.api_endpoint,
+                access_token,
+                Some(existing_snippet_id.clone()),
+            )
+            .await?;
+
+            if resolved_snippet_id != existing_snippet_id.trim() {
+                tracing::info!(
+                    new_snippet_id = %resolved_snippet_id,
+                    "Gitee snippet sync storage was created"
+                );
+                settings.gitee_snippet.gist_id = resolved_snippet_id;
+                self.persist_recovered_settings(settings.clone()).await?;
+                self.refresh_status_after_recovered_settings(&settings)
+                    .await;
+            }
+
+            return build_remote(&settings);
+        }
+
         if settings.provider != "github_gist" {
             return build_remote(&settings);
         }
