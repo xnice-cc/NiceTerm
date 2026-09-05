@@ -3502,19 +3502,31 @@ function App() {
   );
 
   const leftPanelIds = useMemo(
-    () => getSideOpenPanels(uiConfig, "left", multiPanelOpen),
+    () =>
+      getSideOpenPanels(uiConfig, "left", multiPanelOpen).filter(
+        (id) => id !== "savedConnections",
+      ),
     [multiPanelOpen, uiConfig],
   );
   const rightPanelIds = useMemo(
-    () => getSideOpenPanels(uiConfig, "right", multiPanelOpen),
+    () =>
+      getSideOpenPanels(uiConfig, "right", multiPanelOpen).filter(
+        (id) => id !== "savedConnections",
+      ),
     [multiPanelOpen, uiConfig],
   );
   const leftOverlayPanelId = useMemo(
-    () => getSideOverlayPanel(uiConfig, "left", multiPanelOpen),
+    () => {
+      const id = getSideOverlayPanel(uiConfig, "left", multiPanelOpen);
+      return id === "savedConnections" ? null : id;
+    },
     [multiPanelOpen, uiConfig],
   );
   const rightOverlayPanelId = useMemo(
-    () => getSideOverlayPanel(uiConfig, "right", multiPanelOpen),
+    () => {
+      const id = getSideOverlayPanel(uiConfig, "right", multiPanelOpen);
+      return id === "savedConnections" ? null : id;
+    },
     [multiPanelOpen, uiConfig],
   );
   // Only the currently visible panel is highlighted; other pinned panels
@@ -3538,24 +3550,41 @@ function App() {
   const dockedLeftOverlayPanelId = panelOpenMode === "floating" ? null : leftOverlayPanelId;
   const dockedRightOverlayPanelId = panelOpenMode === "floating" ? null : rightOverlayPanelId;
   const dockedLeftActivePanelId =
-    panelOpenMode === "floating" ? null : uiConfig.active_left_panel;
+    panelOpenMode === "floating" || uiConfig.active_left_panel === "savedConnections"
+      ? null
+      : uiConfig.active_left_panel;
   const dockedRightActivePanelId =
-    panelOpenMode === "floating" ? null : uiConfig.active_right_panel;
+    panelOpenMode === "floating" || uiConfig.active_right_panel === "savedConnections"
+      ? null
+      : uiConfig.active_right_panel;
   const visibleFloatingPanels =
-    panelOpenMode === "floating" ? floatingPanels : { left: null, right: null };
+    panelOpenMode === "floating"
+      ? {
+          left: floatingPanels.left === "savedConnections" ? null : floatingPanels.left,
+          right: floatingPanels.right === "savedConnections" ? null : floatingPanels.right,
+        }
+      : { left: null, right: null };
   const leftActivityActiveIds = useMemo(() => {
     if (panelOpenMode !== "floating") return leftActiveIds;
-    return floatingPanels.left ? new Set([floatingPanels.left]) : undefined;
+    return floatingPanels.left && floatingPanels.left !== "savedConnections"
+      ? new Set([floatingPanels.left])
+      : undefined;
   }, [floatingPanels.left, leftActiveIds, panelOpenMode]);
   const rightActivityActiveIds = useMemo(() => {
     if (panelOpenMode !== "floating") return rightActiveIds;
-    return floatingPanels.right ? new Set([floatingPanels.right]) : undefined;
+    return floatingPanels.right && floatingPanels.right !== "savedConnections"
+      ? new Set([floatingPanels.right])
+      : undefined;
   }, [floatingPanels.right, panelOpenMode, rightActiveIds]);
 
   useEffect(() => {
     if (panelOpenMode !== "floating") return;
-    const next = clearUnavailableFloatingPanels(floatingPanels, uiConfig);
-    if (next === floatingPanels) return;
+    const cleared = clearUnavailableFloatingPanels(floatingPanels, uiConfig);
+    const next = {
+      left: cleared.left === "savedConnections" ? null : cleared.left,
+      right: cleared.right === "savedConnections" ? null : cleared.right,
+    };
+    if (next.left === floatingPanels.left && next.right === floatingPanels.right) return;
     setFloatingPanels(next);
     setLastFloatingSide((current) => {
       if (current && next[current]) return current;
@@ -3837,10 +3866,13 @@ function App() {
           setRightOpen: setMobileRightOpen,
         }}
         leftActivityBar={{
-          items: leftTopItems,
-          bottomItems: leftBottomItems,
-          hiddenItems: leftHiddenItems,
-          activeId: panelOpenMode === "floating" ? null : uiConfig.active_left_panel,
+          items: leftTopItems.filter((item) => item.id !== "savedConnections"),
+          bottomItems: leftBottomItems.filter((item) => item.id !== "savedConnections"),
+          hiddenItems: leftHiddenItems.filter((item) => item.id !== "savedConnections"),
+          activeId:
+            panelOpenMode === "floating" || uiConfig.active_left_panel === "savedConnections"
+              ? null
+              : uiConfig.active_left_panel,
           activeIds: leftActivityActiveIds,
           activeBottomIds: toggleActiveIds,
           onSelect: handleItemSelect,
@@ -3855,10 +3887,13 @@ function App() {
           showLabels,
         }}
         rightActivityBar={{
-          items: rightTopItems,
-          bottomItems: rightBottomItems,
-          hiddenItems: rightHiddenItems,
-          activeId: panelOpenMode === "floating" ? null : uiConfig.active_right_panel,
+          items: rightTopItems.filter((item) => item.id !== "savedConnections"),
+          bottomItems: rightBottomItems.filter((item) => item.id !== "savedConnections"),
+          hiddenItems: rightHiddenItems.filter((item) => item.id !== "savedConnections"),
+          activeId:
+            panelOpenMode === "floating" || uiConfig.active_right_panel === "savedConnections"
+              ? null
+              : uiConfig.active_right_panel,
           activeIds: rightActivityActiveIds,
           activeBottomIds: toggleActiveIds,
           onSelect: handleItemSelect,

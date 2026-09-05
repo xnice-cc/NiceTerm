@@ -6,8 +6,8 @@ use crate::error::{AppResult, CloudSyncError};
 use super::crypto::encrypt_snapshot_bytes;
 use super::operator::CloudRemote;
 use super::remote::{
-    REMOTE_SYNC_POINTER_SCHEMA_VERSION, RemoteSyncPointer, SYNC_CURRENT_FILE,
-    legacy_sync_snapshot_file, load_sync_pointer, remote_path, write_sync_pointer,
+    REMOTE_SYNC_POINTER_SCHEMA_VERSION, RemoteSyncPointer, SYNC_CURRENT_FILE, SYNC_SNAPSHOT_FILE,
+    load_sync_pointer, remote_path,
 };
 use super::snapshot_decode_helper::decode_remote_snapshot_with_source_hash_isolated;
 
@@ -16,7 +16,13 @@ const MIN_ENCRYPTED_SNAPSHOT_BYTES: usize = 13;
 const MAX_ENCRYPTED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) fn sync_snapshot_file(revision: &str) -> String {
-    legacy_sync_snapshot_file(revision)
+    // New snapshots always use the single stable filename. Keep non-UUID names
+    // readable for legacy migration fixtures and old stores.
+    if uuid::Uuid::parse_str(revision).is_ok() {
+        SYNC_SNAPSHOT_FILE.to_string()
+    } else {
+        super::remote::legacy_sync_snapshot_file(revision)
+    }
 }
 
 pub(super) fn sync_snapshot_path(remote_root: &str, revision: &str) -> String {
@@ -98,11 +104,15 @@ pub(super) async fn write_current_sync_snapshot_compat(
     remote_root: &str,
     snapshot: &PortableSnapshot,
 ) -> AppResult<()> {
-    let encoded = encode_portable_snapshot(snapshot)?;
-    let encrypted = encrypt_snapshot_bytes(&encoded)?;
-    remote
-        .write(&remote_path(remote_root, SYNC_CURRENT_FILE), encrypted)
-        .await
+    if uuid::Uuid::parse_str(&snapshot.revision_id).is_ok() {
+        upload_sync_snapshot(remote, remote_root, snapshot).await
+    } else {
+        let encoded = encode_portable_snapshot(snapshot)?;
+        let encrypted = encrypt_snapshot_bytes(&encoded)?;
+        remote
+            .write(&remote_path(remote_root, SYNC_CURRENT_FILE), encrypted)
+            .await
+    }
 }
 
 pub(super) async fn read_current_sync_snapshot_compat(
@@ -118,6 +128,13 @@ pub(super) async fn read_current_sync_snapshot_compat_decoded(
     remote: &CloudRemote,
     remote_root: &str,
 ) -> AppResult<Option<DecodedPortableSnapshot>> {
+    let snapshot_path = remote_path(remote_root, SYNC_SNAPSHOT_FILE);
+    if let Some(raw) = remote.read_if_exists(&snapshot_path).await? {
+        validate_remote_snapshot_size(&raw, "snapshot")?;
+        return decode_remote_sync_snapshot(&raw, "snapshot")
+            .await
+            .map(Some);
+    }
     let path = remote_path(remote_root, SYNC_CURRENT_FILE);
     let Some(raw) = remote.read_if_exists(&path).await? else {
         tracing::info!(
@@ -136,7 +153,10 @@ pub(super) async fn commit_sync_pointer(
     remote_root: &str,
     pointer: &RemoteSyncPointer,
 ) -> AppResult<()> {
-    write_sync_pointer(remote, remote_root, pointer).await
+    if uuid::Uuid::parse_str(&pointer.revision_id).is_ok() {
+        return Ok(());
+    }
+    super::remote::write_sync_pointer(remote, remote_root, pointer).await
 }
 
 pub(super) async fn ensure_remote_head_unchanged(
@@ -145,12 +165,12 @@ pub(super) async fn ensure_remote_head_unchanged(
     expected: Option<&RemoteSyncPointer>,
 ) -> AppResult<()> {
     let actual = load_sync_pointer(remote, remote_root).await?;
-    let expected_revision = expected.map(|pointer| pointer.revision_id.clone());
-    let actual_revision = actual.as_ref().map(|pointer| pointer.revision_id.clone());
-    if expected_revision != actual_revision {
+    let expected_hash = expected.map(|pointer| pointer.payload_hash.clone());
+    let actual_hash = actual.as_ref().map(|pointer| pointer.payload_hash.clone());
+    if expected_hash != actual_hash {
         return Err(CloudSyncError::ConcurrentUpdate {
-            expected_revision,
-            actual_revision,
+            expected_revision: expected.map(|pointer| pointer.revision_id.clone()),
+            actual_revision: actual.map(|pointer| pointer.revision_id.clone()),
         }
         .into());
     }
@@ -173,7 +193,9 @@ fn validate_snapshot_source_hash_against_pointer(
     snapshot: &PortableSnapshot,
     source_payload_hash: &str,
 ) -> AppResult<()> {
-    if snapshot.revision_id != pointer.revision_id {
+    if uuid::Uuid::parse_str(&pointer.revision_id).is_err()
+        && snapshot.revision_id != pointer.revision_id
+    {
         return Err(CloudSyncError::RevisionMismatch {
             pointer_revision: pointer.revision_id.clone(),
             snapshot_revision: snapshot.revision_id.clone(),
@@ -775,5 +797,14 @@ mod tests {
             Err(AppError::CloudSync(CloudSyncError::HashMismatch { .. }))
         ));
         set_master_password(None);
+    }
+
+    #[test]
+    fn uuid_snapshots_use_one_stable_remote_path() {
+        let revision = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            sync_snapshot_path("niceterm", &revision),
+            "niceterm/sync/niceterm-snapshot.redb.enc"
+        );
     }
 }

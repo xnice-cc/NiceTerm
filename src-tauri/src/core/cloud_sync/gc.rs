@@ -6,8 +6,8 @@ use crate::error::AppResult;
 use super::operator::CloudRemote;
 use super::protocol::sync_snapshot_file;
 use super::remote::{
-    RemoteSyncPointer, SYNC_SNAPSHOTS_DIR, current_time_ms, is_legacy_sync_snapshot_path,
-    remote_path,
+    RemoteSyncPointer, SYNC_CURRENT_FILE, SYNC_LATEST_FILE, SYNC_SNAPSHOTS_DIR, current_time_ms,
+    is_legacy_sync_snapshot_path, remote_path,
 };
 
 pub(super) const SYNC_SNAPSHOT_KEEP_RECENT: usize = 5;
@@ -55,6 +55,23 @@ pub(super) async fn cleanup_sync_snapshots(
             );
         }
     }
+}
+
+pub(super) async fn cleanup_legacy_sync_objects(
+    remote: &CloudRemote,
+    remote_root: &str,
+) -> AppResult<()> {
+    for path in [SYNC_CURRENT_FILE, SYNC_LATEST_FILE] {
+        let full_path = remote_path(remote_root, path);
+        if remote.exists(&full_path).await? {
+            remote.delete(&full_path).await?;
+        }
+    }
+    let prefix = remote_path(remote_root, SYNC_SNAPSHOTS_DIR);
+    for path in remote.list_files(&prefix).await? {
+        remote.delete(&path).await?;
+    }
+    Ok(())
 }
 
 async fn collect_snapshots(

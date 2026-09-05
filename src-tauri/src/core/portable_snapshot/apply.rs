@@ -25,7 +25,11 @@ pub async fn apply_portable_snapshot(
     config::save_tunnels(app, &snapshot.tunnels)?;
     config::save_tunnel_groups(app, &snapshot.tunnel_groups)?;
     config::save_quick_commands(app, &snapshot.quick_commands)?;
-    crate::storage::replace_command_history_entries(&snapshot.history)?;
+    // Sync snapshots intentionally omit device-local command history. Replacing it
+    // with the empty sync payload would erase the user's local history on every pull.
+    if snapshot.snapshot_kind == PortableSnapshotKind::Backup {
+        crate::storage::replace_command_history_entries(&snapshot.history)?;
+    }
     crate::storage::replace_notes_snapshot(&snapshot.notes)?;
 
     let merged = snapshot.settings.clone().apply_to(

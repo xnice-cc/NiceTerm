@@ -1,14 +1,7 @@
 import type { TFunction } from "i18next";
-import {
-  type ComponentProps,
-  type ReactNode,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import FloatingPanel from "@/components/app/FloatingPanel";
+import { type ComponentProps, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { MdClose, MdTerminal } from "react-icons/md";
+import FloatingPanel from "@/components/app/FloatingPanel";
 import PanelStack from "@/components/app/PanelStack";
 import AboutDialog from "@/components/dialog/app/AboutDialog";
 import LockScreen from "@/components/dialog/app/LockScreen";
@@ -20,10 +13,10 @@ import type { OtpRequest } from "@/components/dialog/connections/OtpDialog";
 import { OtpDialog } from "@/components/dialog/connections/OtpDialog";
 import type { RdpCertificateVerifyRequest } from "@/components/dialog/connections/RdpCertificateVerifyDialog";
 import { RdpCertificateVerifyDialog } from "@/components/dialog/connections/RdpCertificateVerifyDialog";
-import type { SshAuthRequest } from "@/components/dialog/connections/SshAuthDialog";
-import { SshAuthDialog } from "@/components/dialog/connections/SshAuthDialog";
 import type { SshAgentAuthRequest } from "@/components/dialog/connections/SshAgentAuthDialog";
 import { SshAgentAuthDialog } from "@/components/dialog/connections/SshAgentAuthDialog";
+import type { SshAuthRequest } from "@/components/dialog/connections/SshAuthDialog";
+import { SshAuthDialog } from "@/components/dialog/connections/SshAuthDialog";
 import DockerSudoPasswordDialog, {
   type DockerSudoPasswordRequest,
 } from "@/components/dialog/docker/DockerSudoPasswordDialog";
@@ -43,9 +36,9 @@ import {
   isWindowTransparencyEnabled,
   loadBackgroundImageDataUrl,
 } from "@/lib/backgroundImage";
-import { findTerminalWindowLeafByTabId } from "@/lib/tabWindows";
 import { isMacOS } from "@/lib/platform";
 import type { SendCommandPanelDraft } from "@/lib/sendCommandPanelEvents";
+import { findTerminalWindowLeafByTabId } from "@/lib/tabWindows";
 import { bounceTopModalWindow } from "@/lib/windowManager";
 import type {
   AppearanceSettings,
@@ -202,6 +195,8 @@ export default function AppLayout({
   const backgroundImagePath = appearance.background_image_path?.trim() ?? "";
   const [backgroundDataUrl, setBackgroundDataUrl] = useState("");
   const [serialSendRunning, setSerialSendRunning] = useState(false);
+  const [showSavedConnections, setShowSavedConnections] = useState(false);
+  const previousTabsCountRef = useRef(tabsCount);
   // Latch the first time the serial send panel is shown so it stays mounted
   // (but hidden) afterwards, preserving the user's input across hide/show cycles.
   const serialSendEverShownRef = useRef(false);
@@ -221,6 +216,14 @@ export default function AppLayout({
     };
   }, [backgroundImagePath]);
 
+  useEffect(() => {
+    const previousTabsCount = previousTabsCountRef.current;
+    previousTabsCountRef.current = tabsCount;
+    if (showSavedConnections && tabsCount > previousTabsCount) {
+      setShowSavedConnections(false);
+    }
+  }, [showSavedConnections, tabsCount]);
+
   const backgroundEnabled = Boolean(backgroundDataUrl);
   const effectiveAppearance = useMemo(
     () =>
@@ -233,20 +236,16 @@ export default function AppLayout({
     [appearance, backgroundEnabled],
   );
   const backgroundLayerStyle = useMemo(
-    () =>
-      buildBackgroundImageLayerStyle(effectiveAppearance, backgroundDataUrl),
+    () => buildBackgroundImageLayerStyle(effectiveAppearance, backgroundDataUrl),
     [effectiveAppearance, backgroundDataUrl],
   );
-  const windowTransparencyEnabled =
-    isWindowTransparencyEnabled(effectiveAppearance);
+  const windowTransparencyEnabled = isWindowTransparencyEnabled(effectiveAppearance);
   const shellStyle = useMemo(
     () => ({
       ...buildSurfaceCssVariables(theme.colors, effectiveAppearance),
       // When native window transparency is on, the shell background must be
       // transparent so the native backdrop is visible through the webview.
-      backgroundColor: windowTransparencyEnabled
-        ? "transparent"
-        : theme.colors.bg,
+      backgroundColor: windowTransparencyEnabled ? "transparent" : theme.colors.bg,
       color: "var(--df-text)",
     }),
     [effectiveAppearance, theme.colors, windowTransparencyEnabled],
@@ -263,18 +262,18 @@ export default function AppLayout({
   // only open while a panel is actually visible; hiding the visible panel
   // collapses the whole area.
   const leftPanelVisible =
-    leftActivePanelId !== undefined
-      ? leftActivePanelId != null
-      : leftPanelIds.length > 0;
+    leftActivePanelId !== undefined ? leftActivePanelId != null : leftPanelIds.length > 0;
   const rightPanelVisible =
-    rightActivePanelId !== undefined
-      ? rightActivePanelId != null
-      : rightPanelIds.length > 0;
+    rightActivePanelId !== undefined ? rightActivePanelId != null : rightPanelIds.length > 0;
   const leftPanelOpen =
-    hasLeftActivityItems && (leftPanelVisible || Boolean(leftOverlayPanelId));
+    !showSavedConnections &&
+    hasLeftActivityItems &&
+    (leftPanelVisible || Boolean(leftOverlayPanelId));
   const rightPanelOpen =
-    hasRightActivityItems && (rightPanelVisible || Boolean(rightOverlayPanelId));
-  const leftMobileOpen = hasLeftActivityItems && mobile.leftOpen;
+    !showSavedConnections &&
+    hasRightActivityItems &&
+    (rightPanelVisible || Boolean(rightOverlayPanelId));
+  const leftMobileOpen = !showSavedConnections && hasLeftActivityItems && mobile.leftOpen;
 
   // Level-1 terminal tab strip rendered inside the top bar for the active
   // terminal window leaf (grouped hosts + standalone tabs).
@@ -299,14 +298,19 @@ export default function AppLayout({
       focusedTabId={workspace.focusedTabId ?? null}
       unreadTabIds={workspace.unreadTabIds}
       disconnectedTabIds={workspace.disconnectedTabIds}
-      onTabChange={(tabId) => workspace.onSelectTab(activeLeafId, tabId)}
+      onTabChange={(tabId) => {
+        setShowSavedConnections(false);
+        workspace.onSelectTab(activeLeafId, tabId);
+      }}
       onTabClose={workspace.onTabClose}
       onCloseTabs={workspace.onCloseTabs}
       onAddTab={() => {
+        setShowSavedConnections(false);
         if (activeLeafId) workspace.onAddTab(activeLeafId);
         else header.onNewSession();
       }}
       onConnectConnection={(connection) => {
+        setShowSavedConnections(false);
         if (activeLeafId) {
           void workspace.onConnectConnection(activeLeafId, connection);
         } else {
@@ -345,7 +349,7 @@ export default function AppLayout({
       }
     />
   );
-  const rightMobileOpen = hasRightActivityItems && mobile.rightOpen;
+  const rightMobileOpen = !showSavedConnections && hasRightActivityItems && mobile.rightOpen;
   const serialSendVisible = bottomPanel.activePanel === "serialSend";
   if (serialSendVisible) {
     serialSendEverShownRef.current = true;
@@ -392,10 +396,7 @@ export default function AppLayout({
       data-wallpaper-enabled={backgroundEnabled ? "true" : "false"}
       data-window-transparency={windowTransparencyEnabled ? "true" : "false"}
       data-window-transparency-blur={
-        windowTransparencyEnabled &&
-        effectiveAppearance.window_transparency_blur
-          ? "true"
-          : "false"
+        windowTransparencyEnabled && effectiveAppearance.window_transparency_blur ? "true" : "false"
       }
       style={shellStyle}
     >
@@ -409,11 +410,14 @@ export default function AppLayout({
       <div className="relative z-10 flex h-full min-h-0 flex-col">
         <Header
           {...header}
+          onOpenSavedConnections={() => setShowSavedConnections((visible) => !visible)}
           tabsSlot={headerTabs}
           onToggleLeft={() => {
+            setShowSavedConnections(false);
             if (hasLeftActivityItems) mobile.setLeftOpen(!mobile.leftOpen);
           }}
           onToggleRight={() => {
+            setShowSavedConnections(false);
             if (hasRightActivityItems) mobile.setRightOpen(!mobile.rightOpen);
           }}
         />
@@ -434,6 +438,10 @@ export default function AppLayout({
               {...leftActivityBar}
               side="left"
               zone={{ top: "left_top", bottom: "left_bottom" }}
+              onSelect={(id) => {
+                setShowSavedConnections(false);
+                leftActivityBar.onSelect(id);
+              }}
             />
           )}
 
@@ -480,13 +488,7 @@ export default function AppLayout({
                     sizes={panelStackSizes}
                     renderPanel={panelContent}
                     onResizePair={(aboveId, belowId, delta, containerHeight) =>
-                      onPanelStackResize(
-                        "left",
-                        aboveId,
-                        belowId,
-                        delta,
-                        containerHeight,
-                      )
+                      onPanelStackResize("left", aboveId, belowId, delta, containerHeight)
                     }
                   />
                 </div>
@@ -502,13 +504,15 @@ export default function AppLayout({
           <section
             className="flex-1 flex flex-col relative min-w-0 origin-top-left"
             style={{
-              backgroundColor: backgroundEnabled
-                ? "transparent"
-                : "var(--df-bg-terminal)",
+              backgroundColor: backgroundEnabled ? "transparent" : "var(--df-bg-terminal)",
             }}
           >
             <div className="flex-1 relative overflow-hidden">
-              {tabsCount === 0 ? (
+              {showSavedConnections ? (
+                <div className="h-full min-h-0 overflow-hidden bg-[var(--df-bg-terminal)]">
+                  {panelContent("savedConnections")}
+                </div>
+              ) : tabsCount === 0 ? (
                 <StartWorkspace
                   t={t}
                   backgroundEnabled={backgroundEnabled}
@@ -561,10 +565,7 @@ export default function AppLayout({
 
             {bottomPanel.activePanel === "quickCmdBar" && (
               <>
-                <ResizeHandle
-                  direction="vertical"
-                  onResize={bottomPanel.onQuickCmdResize}
-                />
+                <ResizeHandle direction="vertical" onResize={bottomPanel.onQuickCmdResize} />
                 <div
                   style={{
                     height: bottomPanel.quickCmdHeight,
@@ -581,40 +582,35 @@ export default function AppLayout({
             )}
 
             {serialSendVisible && (
-              <ResizeHandle
-                direction="vertical"
-                onResize={bottomPanel.onSerialSendResize}
-              />
+              <ResizeHandle direction="vertical" onResize={bottomPanel.onSerialSendResize} />
             )}
 
             {serialSendMounted && (
-              <>
-                <div
-                  style={{
-                    ...(serialSendVisible
-                      ? {
-                          height: bottomPanel.serialSendHeight,
-                          backgroundColor: "var(--df-bg-panel)",
-                        }
-                      : {}),
-                  }}
-                  className={serialSendVisible ? "shrink-0 overflow-hidden" : "hidden"}
-                >
-                  <SerialSendPanel
-                    serialSessionId={bottomPanel.activeSerialSessionId}
-                    currentShellSessionId={bottomPanel.activeNonSerialSessionId}
-                    shellSessionIds={bottomPanel.activeNonSerialSessionIds}
-                    syncGroups={bottomPanel.syncGroups}
-                    currentWindowLabel={bottomPanel.currentWindowLabel}
-                    sessionTargets={bottomPanel.sessionTargets}
-                    clearAfterSend={bottomPanel.clearAfterSend}
-                    draft={bottomPanel.sendCommandDraft}
-                    onDraftConsumed={bottomPanel.onSendCommandDraftConsumed}
-                    onSendingChange={setSerialSendRunning}
-                    onClearAfterSendChange={bottomPanel.onClearAfterSendChange}
-                  />
-                </div>
-              </>
+              <div
+                style={{
+                  ...(serialSendVisible
+                    ? {
+                        height: bottomPanel.serialSendHeight,
+                        backgroundColor: "var(--df-bg-panel)",
+                      }
+                    : {}),
+                }}
+                className={serialSendVisible ? "shrink-0 overflow-hidden" : "hidden"}
+              >
+                <SerialSendPanel
+                  serialSessionId={bottomPanel.activeSerialSessionId}
+                  currentShellSessionId={bottomPanel.activeNonSerialSessionId}
+                  shellSessionIds={bottomPanel.activeNonSerialSessionIds}
+                  syncGroups={bottomPanel.syncGroups}
+                  currentWindowLabel={bottomPanel.currentWindowLabel}
+                  sessionTargets={bottomPanel.sessionTargets}
+                  clearAfterSend={bottomPanel.clearAfterSend}
+                  draft={bottomPanel.sendCommandDraft}
+                  onDraftConsumed={bottomPanel.onSendCommandDraftConsumed}
+                  onSendingChange={setSerialSendRunning}
+                  onClearAfterSendChange={bottomPanel.onClearAfterSendChange}
+                />
+              </div>
             )}
           </section>
 
@@ -670,13 +666,7 @@ export default function AppLayout({
                     sizes={panelStackSizes}
                     renderPanel={panelContent}
                     onResizePair={(aboveId, belowId, delta, containerHeight) =>
-                      onPanelStackResize(
-                        "right",
-                        aboveId,
-                        belowId,
-                        delta,
-                        containerHeight,
-                      )
+                      onPanelStackResize("right", aboveId, belowId, delta, containerHeight)
                     }
                   />
                 </div>
@@ -689,24 +679,22 @@ export default function AppLayout({
               {...rightActivityBar}
               side="right"
               zone={{ top: "right_top", bottom: "right_bottom" }}
+              onSelect={(id) => {
+                setShowSavedConnections(false);
+                rightActivityBar.onSelect(id);
+              }}
             />
           )}
         </main>
 
-        <AboutDialog
-          open={dialogs.aboutOpen}
-          onClose={() => dialogs.onAboutOpenChange(false)}
-        />
+        <AboutDialog open={dialogs.aboutOpen} onClose={() => dialogs.onAboutOpenChange(false)} />
 
         <SyncGroupDialog
           open={dialogs.syncGroupOpen}
           onClose={() => dialogs.onSyncGroupOpenChange(false)}
         />
 
-        <UpdateDialog
-          open={dialogs.updateOpen}
-          onClose={() => dialogs.onUpdateOpenChange(false)}
-        />
+        <UpdateDialog open={dialogs.updateOpen} onClose={() => dialogs.onUpdateOpenChange(false)} />
 
         <QuitConfirmDialog
           open={dialogs.quitConfirmOpen}
@@ -715,10 +703,7 @@ export default function AppLayout({
         />
 
         <OtpDialog request={dialogs.otpRequest} onDone={dialogs.onOtpDone} />
-        <SshAuthDialog
-          request={dialogs.sshAuthRequest}
-          onDone={dialogs.onSshAuthDone}
-        />
+        <SshAuthDialog request={dialogs.sshAuthRequest} onDone={dialogs.onSshAuthDone} />
         <SshAgentAuthDialog
           request={dialogs.sshAgentAuthRequest}
           onDone={dialogs.onSshAgentAuthDone}

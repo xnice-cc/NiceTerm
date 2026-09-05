@@ -26,12 +26,16 @@ use crate::config::CloudSyncSettings;
 use crate::error::{AppError, AppResult};
 use crate::utils::url::normalize_storage_endpoint;
 
-use super::remote::{SYNC_CURRENT_FILE, SYNC_LATEST_FILE, SYNC_SNAPSHOTS_DIR, remote_path};
+use super::remote::{
+    SYNC_CURRENT_FILE, SYNC_DIR, SYNC_LATEST_FILE, SYNC_SNAPSHOT_FILE, SYNC_SNAPSHOTS_DIR,
+    remote_path,
+};
 
 const GITEE_REMOTE_FILE_PREFIX: &str = "niceterm-";
 const GITEE_REMOTE_FILE_SUFFIX: &str = ".blob";
 const GITEE_SYNC_LATEST_FILENAME: &str = "niceterm-latest.redb";
 const GITEE_SYNC_CURRENT_FILENAME: &str = "niceterm-current.redb.enc";
+const GITEE_SYNC_SNAPSHOT_FILENAME: &str = "niceterm-snapshot.redb.enc";
 const GITEE_SYNC_SNAPSHOT_FILE_PREFIX: &str = "niceterm-snapshot-";
 const GITEE_SYNC_SNAPSHOT_FILE_SUFFIX: &str = ".redb.enc";
 const GITEE_README_FILENAME: &str = "niceterm-readme.txt";
@@ -445,9 +449,7 @@ fn storage_timeout_layer() -> TimeoutLayer {
 }
 
 pub(super) async fn ensure_remote_layout(remote: &CloudRemote, base_root: &str) -> AppResult<()> {
-    remote
-        .create_dir(&remote_path(base_root, super::remote::SYNC_SNAPSHOTS_DIR))
-        .await?;
+    remote.create_dir(&remote_path(base_root, SYNC_DIR)).await?;
     Ok(())
 }
 
@@ -832,6 +834,9 @@ fn gitee_semantic_remote_filename(path: &str) -> Option<String> {
     if sync_path == SYNC_CURRENT_FILE {
         return Some(GITEE_SYNC_CURRENT_FILENAME.to_string());
     }
+    if sync_path == SYNC_SNAPSHOT_FILE {
+        return Some(GITEE_SYNC_SNAPSHOT_FILENAME.to_string());
+    }
 
     let snapshot = sync_path.strip_prefix(SYNC_SNAPSHOTS_DIR)?;
     let revision = snapshot.strip_suffix(".redb.enc")?;
@@ -847,6 +852,7 @@ fn gitee_sync_path(path: &str) -> Option<&str> {
     let normalized = path.trim().trim_matches('/');
     if normalized == SYNC_LATEST_FILE
         || normalized == SYNC_CURRENT_FILE
+        || normalized == SYNC_SNAPSHOT_FILE
         || normalized.starts_with(SYNC_SNAPSHOTS_DIR)
     {
         return Some(normalized);
@@ -865,6 +871,13 @@ fn gitee_sync_path(path: &str) -> Option<&str> {
             .is_some_and(|prefix| prefix.ends_with('/'))
     {
         return Some(SYNC_CURRENT_FILE);
+    }
+    if normalized.ends_with(SYNC_SNAPSHOT_FILE)
+        && normalized
+            .strip_suffix(SYNC_SNAPSHOT_FILE)
+            .is_some_and(|prefix| prefix.ends_with('/') || prefix.is_empty())
+    {
+        return Some(SYNC_SNAPSHOT_FILE);
     }
     normalized
         .rfind("/sync/snapshots/")
@@ -893,6 +906,9 @@ fn gitee_semantic_remote_path(filename: &str) -> Option<String> {
     }
     if filename == GITEE_SYNC_CURRENT_FILENAME {
         return Some(SYNC_CURRENT_FILE.to_string());
+    }
+    if filename == GITEE_SYNC_SNAPSHOT_FILENAME {
+        return Some(SYNC_SNAPSHOT_FILE.to_string());
     }
 
     let revision = filename
@@ -1606,6 +1622,10 @@ mod tests {
         assert_eq!(
             gitee_remote_filename("niceterm/sync/current.redb.enc"),
             GITEE_SYNC_CURRENT_FILENAME
+        );
+        assert_eq!(
+            gitee_remote_filename("niceterm/sync/niceterm-snapshot.redb.enc"),
+            GITEE_SYNC_SNAPSHOT_FILENAME
         );
         assert_eq!(
             gitee_remote_filename("niceterm/sync/snapshots/rev.redb.enc"),

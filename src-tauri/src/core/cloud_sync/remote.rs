@@ -10,6 +10,9 @@ use crate::error::{AppError, AppResult};
 
 use super::operator::CloudRemote;
 
+pub(super) const SYNC_SNAPSHOT_FILE: &str = "sync/niceterm-snapshot.redb.enc";
+pub(super) const SYNC_DIR: &str = "sync/";
+// Legacy paths are retained only so cleanup and migration can remove/read old data.
 pub(super) const SYNC_CURRENT_FILE: &str = "sync/current.redb.enc";
 pub(super) const SYNC_LATEST_FILE: &str = "sync/latest.redb";
 pub(super) const SYNC_SNAPSHOTS_DIR: &str = "sync/snapshots/";
@@ -71,16 +74,46 @@ pub(super) async fn load_sync_pointer(
     remote: &CloudRemote,
     base_root: &str,
 ) -> AppResult<Option<RemoteSyncPointer>> {
+    let snapshot_path = remote_path(base_root, SYNC_SNAPSHOT_FILE);
+    if let Some(raw) = remote.read_if_exists(&snapshot_path).await? {
+        let decrypted = super::crypto::decrypt_snapshot_bytes(&raw)?;
+        let snapshot = crate::core::portable_snapshot::decode_portable_snapshot(&decrypted)?;
+        return Ok(Some(RemoteSyncPointer {
+            schema_version: REMOTE_SYNC_POINTER_SCHEMA_VERSION,
+            revision_id: snapshot.revision_id,
+            created_at_ms: snapshot.created_at_ms,
+            payload_hash: snapshot.payload_hash,
+            device_id: snapshot.device_id,
+            app_version: snapshot.app_version,
+        }));
+    }
+
+    // Read the legacy pointer only for one-time migration of existing stores.
     let path = remote_path(base_root, SYNC_LATEST_FILE);
     let Some(raw) = remote.read_if_exists(&path).await? else {
         return Ok(None);
     };
-    decode_redb_json_doc(
+    let pointer: RemoteSyncPointer = decode_redb_json_doc(
         raw.as_slice(),
         REMOTE_SYNC_POINTER_TABLE,
         REMOTE_SYNC_POINTER_KEY,
-    )
-    .map(Some)
+    )?;
+    if pointer.revision_id.trim() != pointer.revision_id
+        || pointer.revision_id.trim().is_empty()
+        || pointer.revision_id.len() > 128
+        || pointer.revision_id == "."
+        || pointer.revision_id == ".."
+        || pointer.revision_id.contains('/')
+        || pointer.revision_id.contains('\\')
+        || pointer.revision_id.contains('\0')
+    {
+        return Err(AppError::CloudSync(
+            crate::error::CloudSyncError::CorruptedSnapshot {
+                revision: pointer.revision_id,
+            },
+        ));
+    }
+    Ok(Some(pointer))
 }
 
 pub(super) async fn write_sync_pointer(

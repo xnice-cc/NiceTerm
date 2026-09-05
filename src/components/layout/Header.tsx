@@ -26,6 +26,7 @@ import {
   MdInfo,
   MdKeyboardArrowDown,
   MdKeyboardArrowUp,
+  MdLink,
   MdListAlt,
   MdMemory,
   MdMenu,
@@ -169,6 +170,7 @@ const iconMap: Record<string, React.ElementType> = {
   fit_screen: MdFitScreen,
   terminal: MdTerminal,
   computer: MdComputer,
+  link: MdLink,
   search: MdSearch,
   memory: MdMemory,
   speed: MdSpeed,
@@ -557,6 +559,7 @@ function HeaderMiniProgress({ value }: { value: number | null }) {
 
 interface HeaderProps {
   onNewSession: () => void;
+  onOpenSavedConnections?: () => void;
   /** Level-1 terminal tab strip rendered in the top bar center (replaces the status info). */
   tabsSlot?: ReactNode;
   onToggleLeft?: () => void;
@@ -720,6 +723,7 @@ function getActivityBarPanelLabel(id: string, t: (key: string, opts?: Record<str
 /** Top bar with File/Edit/View/Terminal menus, theme picker, and mobile toggles. */
 export default function Header({
   onNewSession,
+  onOpenSavedConnections,
   tabsSlot,
   onToggleLeft,
   onToggleRight,
@@ -879,9 +883,14 @@ export default function Header({
   };
 
   const menuKeys = [
-    { key: "file", label: t("menu.file") },
-    { key: "view", label: t("menu.view") },
-    { key: "terminal", label: t("menu.terminal") },
+    { key: "file", label: t("menu.file"), directAction: undefined },
+    {
+      key: "savedConnections",
+      label: t("menu.savedConnections"),
+      directAction: onOpenSavedConnections,
+    },
+    { key: "view", label: t("menu.view"), directAction: undefined },
+    { key: "terminal", label: t("menu.terminal"), directAction: undefined },
   ];
 
   const buildActivityBarPanelMenuItems = (side: "left" | "right"): MenuItem[] => {
@@ -927,6 +936,14 @@ export default function Header({
         label: t("settings.exportConfig"),
         action: handleExport,
         icon: "file_export",
+      },
+    ],
+    savedConnections: [
+      {
+        id: "savedConnections.open",
+        label: t("menu.savedConnections"),
+        icon: "link",
+        action: () => onOpenSavedConnections?.(),
       },
     ],
     view: [
@@ -1299,6 +1316,11 @@ export default function Header({
         id: "file",
         label: t("menu.file"),
         items: convertMenuItemsForMacos(menus.file),
+      },
+      {
+        id: "savedConnections",
+        label: t("menu.savedConnections"),
+        items: convertMenuItemsForMacos(menus.savedConnections),
       },
       {
         id: "edit",
@@ -1821,16 +1843,23 @@ export default function Header({
 
         {!isMacOS && (
           <Menubar className="border-none bg-transparent h-auto p-0 gap-1 shadow-none">
-            {menuKeys.map(({ key, label }) => (
+            {menuKeys.map(({ key, label, directAction }) => (
               <MenubarMenu key={key}>
                 <MenubarTrigger
+                  onClick={(event) => {
+                    if (!directAction) return;
+                    event.preventDefault();
+                    directAction();
+                  }}
                   className="relative cursor-default px-2.5 py-1 text-xs font-medium rounded-md transition-colors text-[var(--df-text-muted)] data-[state=open]:text-[var(--df-primary)] data-[state=open]:bg-[color-mix(in_srgb,var(--df-primary)_10%,transparent)] hover:bg-[color-mix(in_srgb,var(--df-text-muted)_10%,transparent)] focus:bg-[color-mix(in_srgb,var(--df-text-muted)_10%,transparent)] focus:text-[var(--df-text-muted)] data-[state=open]:focus:bg-[color-mix(in_srgb,var(--df-primary)_10%,transparent)] data-[state=open]:focus:text-[var(--df-primary)] outline-none"
                 >
                   {label}
                 </MenubarTrigger>
-                <MenubarContent align="start" className="min-w-[180px]">
-                  {menus[key].map((item, idx) => renderMenuItem(item, idx))}
-                </MenubarContent>
+                {!directAction && (
+                  <MenubarContent align="start" className="min-w-[180px]">
+                    {menus[key].map((item, idx) => renderMenuItem(item, idx))}
+                  </MenubarContent>
+                )}
               </MenubarMenu>
             ))}
           </Menubar>

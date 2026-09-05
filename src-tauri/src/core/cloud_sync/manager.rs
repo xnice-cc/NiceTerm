@@ -14,14 +14,16 @@ use crate::config::{
 use crate::error::{AppError, AppResult};
 
 use super::crypto::require_master_password;
-use super::gc::{SYNC_SNAPSHOT_GC_GRACE_PERIOD, cleanup_sync_snapshots};
+use super::gc::{
+    SYNC_SNAPSHOT_GC_GRACE_PERIOD, cleanup_legacy_sync_objects, cleanup_sync_snapshots,
+};
 use super::history_log::{log_history_entry, read_cloud_sync_history_from_logs};
 use super::migration::{
     RemoteSnapshotResolution, recover_current_remote_snapshot, resolve_remote_snapshot,
 };
 use super::operator::{build_remote, ensure_remote_layout};
 use super::protocol::{
-    commit_sync_pointer, ensure_remote_head_unchanged, pointer_from_snapshot, upload_sync_snapshot,
+    commit_sync_pointer, pointer_from_snapshot, upload_sync_snapshot,
     verify_uploaded_sync_snapshot, write_current_sync_snapshot_compat,
 };
 use super::remote::{
@@ -211,6 +213,12 @@ impl CloudSyncManager {
     }
 
     pub async fn test_connection(&self) -> AppResult<()> {
+        // Connection tests touch the same remote metadata and recovered provider
+        // settings as push/pull. Serialize them so a test cannot race a sync
+        // operation and leave the manager with mixed status or provider state.
+        let _guard = self.operation_lock.try_lock().map_err(|_| {
+            AppError::Config("Another cloud sync operation is already running".to_string())
+        })?;
         let started = Instant::now();
         let settings = self.settings.lock().await.clone();
         let result = with_operation_timeout(
@@ -290,16 +298,43 @@ impl CloudSyncManager {
     }
 
     pub async fn sync_push_now(self: &Arc<Self>, trigger: &str) -> AppResult<()> {
-        match with_operation_timeout(
+        let result = with_operation_timeout(
             trigger,
             CLOUD_SYNC_OPERATION_TIMEOUT,
             self.push_snapshot(trigger, false),
         )
-        .await
-        {
+        .await;
+
+        // If the pointer survived but its immutable object was deleted, there
+        // is no remote payload left to pull. A user-initiated push can safely
+        // rebuild the remote head from the local snapshot; automatic pushes
+        // still keep the conservative error so they never overwrite silently.
+        let result = if trigger == "manual_push"
+            && matches!(
+                result.as_ref(),
+                Err(error) if is_missing_remote_snapshot_error(error)
+            ) {
+            with_operation_timeout(
+                "repair_missing_remote",
+                CLOUD_SYNC_OPERATION_TIMEOUT,
+                self.push_snapshot("repair_missing_remote", true),
+            )
+            .await
+        } else {
+            result
+        };
+
+        match result {
             Ok(()) => {
                 self.reset_automatic_retry().await;
                 Ok(())
+            }
+            Err(error) if is_missing_remote_snapshot_error(&error) => {
+                let actionable = AppError::Config(
+                    "Remote sync snapshot is missing; upload the local version to rebuild the cloud snapshot.".to_string(),
+                );
+                self.record_failure("sync", trigger, &actionable).await;
+                Err(actionable)
             }
             Err(error) => {
                 self.record_failure("sync", trigger, &error).await;
@@ -319,6 +354,13 @@ impl CloudSyncManager {
             Ok(()) => {
                 self.reset_automatic_retry().await;
                 Ok(())
+            }
+            Err(error) if is_missing_remote_snapshot_error(&error) => {
+                let actionable = AppError::Config(
+                    "Remote sync snapshot is missing; upload the local version to rebuild the cloud snapshot.".to_string(),
+                );
+                self.record_failure("sync", trigger, &actionable).await;
+                Err(actionable)
             }
             Err(error) => {
                 self.record_failure("sync", trigger, &error).await;
@@ -771,14 +813,14 @@ impl CloudSyncManager {
                 match trace_cloud_sync_step(trigger, "resolve_remote_snapshot", async {
                     resolve_remote_snapshot(&remote, &settings.remote_root, remote_pointer).await
                 })
-                .await?
+                .await
                 {
-                    RemoteSnapshotResolution::Current(_)
-                    | RemoteSnapshotResolution::LegacyMigrated(_) => {}
-                    RemoteSnapshotResolution::Inconsistent {
+                    Ok(RemoteSnapshotResolution::Current(_))
+                    | Ok(RemoteSnapshotResolution::LegacyMigrated(_)) => {}
+                    Ok(RemoteSnapshotResolution::Inconsistent {
                         pointer,
                         recovery_candidate,
-                    } => {
+                    }) => {
                         let conflict = remote_inconsistent_preview(
                             &settings,
                             &local_hash,
@@ -791,6 +833,10 @@ impl CloudSyncManager {
                             "Cloud sync remote metadata is inconsistent".to_string(),
                         ));
                     }
+                    // With a forced local repair the pointer may be dangling.
+                    // The upload below replaces it with a verified local snapshot.
+                    Err(error) if force && is_missing_remote_snapshot_error(&error) => {}
+                    Err(error) => return Err(error),
                 }
                 {
                     let mut state = self.state.lock().await;
@@ -810,55 +856,6 @@ impl CloudSyncManager {
             }
         }
 
-        let remote_changed = latest.as_ref().is_some_and(|remote| {
-            state_snapshot
-                .last_applied_remote_revision
-                .as_deref()
-                .map_or(true, |revision| revision != remote.revision_id)
-        });
-        let local_changed = state_snapshot
-            .last_synced_payload_hash
-            .as_deref()
-            .map_or(true, |hash| hash != local_hash);
-
-        if remote_changed && !force {
-            if local_changed {
-                let remote = latest.expect("checked above");
-                let conflict = CloudConflictPreview {
-                    detected_at_ms: current_time_ms(),
-                    provider: settings.provider.clone(),
-                    kind: "content_conflict".to_string(),
-                    local_payload_hash: local_hash.clone(),
-                    remote_payload_hash: remote.payload_hash.clone(),
-                    remote_revision: remote.revision_id.clone(),
-                    remote_created_at_ms: remote.created_at_ms,
-                    remote_device_id: remote.device_id.clone(),
-                    recovery_revision: None,
-                    recovery_payload_hash: None,
-                    recovery_created_at_ms: None,
-                    message: "Both local and cloud state changed since last sync".to_string(),
-                };
-                self.append_history(CloudSyncHistoryEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    timestamp_ms: current_time_ms(),
-                    kind: "sync".to_string(),
-                    status: "conflict".to_string(),
-                    trigger: trigger.to_string(),
-                    provider: Some(settings.provider.clone()),
-                    revision: Some(remote.revision_id.clone()),
-                    duration_ms: Some(elapsed_ms(started.elapsed())),
-                    message: conflict.message.clone(),
-                })
-                .await;
-                self.set_status("conflict", conflict.message.clone(), None, Some(conflict))
-                    .await;
-                return Err(AppError::Config("Cloud sync conflict detected".to_string()));
-            }
-            return Err(AppError::Config(
-                "Remote snapshot is newer than local state. Pull first.".to_string(),
-            ));
-        }
-
         self.set_status(
             "running",
             "Uploading cloud sync snapshot".to_string(),
@@ -876,13 +873,6 @@ impl CloudSyncManager {
             verify_uploaded_sync_snapshot(&remote, &settings.remote_root, &pointer).await
         })
         .await?;
-
-        if !force {
-            trace_cloud_sync_step(trigger, "recheck_sync_pointer", async {
-                ensure_remote_head_unchanged(&remote, &settings.remote_root, latest.as_ref()).await
-            })
-            .await?;
-        }
 
         self.set_status(
             "running",
@@ -1013,7 +1003,7 @@ impl CloudSyncManager {
         Ok(())
     }
 
-    async fn pull_snapshot_locked(self: &Arc<Self>, trigger: &str, force: bool) -> AppResult<()> {
+    async fn pull_snapshot_locked(self: &Arc<Self>, trigger: &str, _force: bool) -> AppResult<()> {
         let _ = require_master_password()?;
         let settings = self.settings.lock().await.clone();
         if !settings.enabled {
@@ -1068,14 +1058,6 @@ impl CloudSyncManager {
             PortableSnapshotKind::Sync,
             &state_snapshot.device_id,
         )?;
-        let local_changed = state_snapshot
-            .last_synced_payload_hash
-            .as_deref()
-            .map_or(true, |hash| hash != local_envelope.payload_hash);
-        let remote_changed = state_snapshot
-            .last_applied_remote_revision
-            .as_deref()
-            .map_or(true, |revision| revision != latest.revision_id);
 
         let remote_envelope =
             match trace_cloud_sync_step(trigger, "resolve_remote_snapshot", async {
@@ -1131,44 +1113,6 @@ impl CloudSyncManager {
             )
             .await;
             return Ok(());
-        }
-
-        if remote_changed && local_changed && !force {
-            let conflict = CloudConflictPreview {
-                detected_at_ms: current_time_ms(),
-                provider: settings.provider.clone(),
-                kind: "content_conflict".to_string(),
-                local_payload_hash: local_envelope.payload_hash.clone(),
-                remote_payload_hash: latest.payload_hash.clone(),
-                remote_revision: latest.revision_id.clone(),
-                remote_created_at_ms: latest.created_at_ms,
-                remote_device_id: latest.device_id.clone(),
-                recovery_revision: None,
-                recovery_payload_hash: None,
-                recovery_created_at_ms: None,
-                message: "Both local and cloud state changed since last sync".to_string(),
-            };
-            self.append_history(CloudSyncHistoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                timestamp_ms: current_time_ms(),
-                kind: "sync".to_string(),
-                status: "conflict".to_string(),
-                trigger: trigger.to_string(),
-                provider: Some(settings.provider.clone()),
-                revision: Some(latest.revision_id.clone()),
-                duration_ms: Some(elapsed_ms(started.elapsed())),
-                message: conflict.message.clone(),
-            })
-            .await;
-            self.set_status("conflict", conflict.message.clone(), None, Some(conflict))
-                .await;
-            return Err(AppError::Config("Cloud sync conflict detected".to_string()));
-        }
-
-        if !remote_changed && !force {
-            return Err(AppError::Config(
-                "No newer remote sync snapshot is available".to_string(),
-            ));
         }
 
         self.set_status(
@@ -1394,9 +1338,8 @@ impl CloudSyncManager {
     }
 
     async fn persist_recovered_settings(&self, settings: CloudSyncSettings) -> AppResult<()> {
-        *self.settings.lock().await = settings.clone();
-
         let app = self.app()?;
+        let runtime_settings = settings.clone();
         let mut app_settings = config::load_app_settings(&app)?;
         app_settings.cloud_sync = settings;
 
@@ -1405,6 +1348,12 @@ impl CloudSyncManager {
             config::encrypt_cloud_sync_settings(persisted_settings.cloud_sync)?;
         persisted_settings.ai = config::encrypt_ai_settings(persisted_settings.ai)?;
         config::save_app_settings(&app, &persisted_settings)?;
+
+        // Only publish the recovered provider ID after durable persistence. If
+        // storage fails, keeping the previous in-memory settings lets the next
+        // attempt retry recovery consistently instead of using an ID that was
+        // never saved.
+        *self.settings.lock().await = runtime_settings;
 
         let _ = app.emit("settings-changed", ());
         crate::tray::schedule_refresh(&app);
@@ -1540,22 +1489,11 @@ fn decide_remote_check(
     if remote.payload_hash == local_hash {
         return RemoteCheckDecision::UpToDate;
     }
-
-    let local_changed = state
-        .last_synced_payload_hash
-        .as_deref()
-        .map_or(true, |hash| hash != local_hash);
-    let remote_changed = state
-        .last_applied_remote_revision
-        .as_deref()
-        .map_or(true, |revision| revision != remote.revision_id);
-
-    match (remote_changed, local_changed, allow_auto_pull) {
-        (true, true, _) => RemoteCheckDecision::Conflict,
-        (true, false, true) => RemoteCheckDecision::AutoPull,
-        (true, false, false) => RemoteCheckDecision::RemoteAvailable,
-        (false, true, _) => RemoteCheckDecision::LocalChanged,
-        (false, false, _) => RemoteCheckDecision::UpToDate,
+    let _ = state;
+    if allow_auto_pull {
+        RemoteCheckDecision::AutoPull
+    } else {
+        RemoteCheckDecision::RemoteAvailable
     }
 }
 
@@ -1612,6 +1550,9 @@ fn schedule_sync_snapshot_gc(
             "cleanup_sync_snapshots",
             CLOUD_SYNC_CLEANUP_TIMEOUT,
             async {
+                if let Err(error) = cleanup_legacy_sync_objects(&remote, &remote_root).await {
+                    tracing::warn!(error = %error, "Failed to remove legacy cloud sync objects");
+                }
                 cleanup_sync_snapshots(&remote, &remote_root, latest.as_ref()).await;
                 Ok(())
             },
@@ -1639,6 +1580,13 @@ fn is_non_retryable_automatic_error(error: &AppError) -> bool {
     matches!(
         error,
         AppError::Auth(_) | AppError::Config(_) | AppError::Crypto(_) | AppError::CloudSync(_)
+    )
+}
+
+fn is_missing_remote_snapshot_error(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::CloudSync(crate::error::CloudSyncError::SnapshotMissing { .. })
     )
 }
 
@@ -1759,24 +1707,24 @@ mod tests {
     }
 
     #[test]
-    fn remote_check_decides_local_changed_when_only_local_changed() {
+    fn remote_check_uses_remote_payload_when_hashes_differ() {
         let state = synced_state("r1", "hash-1");
         let remote = remote_pointer("r1", "hash-remote");
 
         assert_eq!(
             decide_remote_check(&state, "hash-local", &remote, true),
-            RemoteCheckDecision::LocalChanged
+            RemoteCheckDecision::AutoPull
         );
     }
 
     #[test]
-    fn remote_check_decides_conflict_when_local_and_remote_changed() {
+    fn remote_check_does_not_compare_revision_or_local_node_state() {
         let state = synced_state("r1", "hash-1");
         let remote = remote_pointer("r2", "hash-2");
 
         assert_eq!(
             decide_remote_check(&state, "hash-local", &remote, true),
-            RemoteCheckDecision::Conflict
+            RemoteCheckDecision::AutoPull
         );
     }
 

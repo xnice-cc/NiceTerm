@@ -628,6 +628,7 @@ function FileExplorer(props: FileExplorerProps) {
             }}
           >
             <FileExplorerPane
+              key={selectedTarget.id}
               activeSessionId={selectedTarget.id}
               activeSessionType={toFileExplorerSessionType(selectedTarget)}
               activeConnectionId={null}
@@ -658,6 +659,7 @@ function FileExplorer(props: FileExplorerProps) {
   return (
     <div ref={containerRef} className="relative h-full min-h-0">
       <FileExplorerPane
+        key={props.activeSessionId ?? "no-session"}
         {...props}
         activeSessionName={
           props.activeSessionName ?? currentSession?.name ?? null
@@ -1248,11 +1250,19 @@ function FileExplorerPane({
     ) => {
       if (!canBrowseFiles || !activeSessionId) return false;
       const backend = explorerBackendRef.current;
+      // A directory request can outlive a terminal switch. Do not let a
+      // response from the previous session mutate the visible list.
+      const requestSessionId = activeSessionId;
+      const isCurrentRequest = () =>
+        activeSessionIdRef.current === requestSessionId &&
+        explorerBackendRef.current === backend;
+      if (!isCurrentRequest()) return false;
       const normalizedPath = normalizeExplorerPath(path, backend);
       if (!normalizedPath) return false;
       const historyMode = options?.history ?? "push";
       const expand = options?.expand !== false;
       if (expand) {
+        if (!isCurrentRequest()) return false;
         setLoadingDirPaths((prev) => {
           const next = new Set(prev);
           next.add(normalizedPath);
@@ -1298,6 +1308,7 @@ function FileExplorerPane({
             joinExplorerPath(normalizedPath, entry.name, backend),
           ),
         );
+        if (!isCurrentRequest()) return false;
 
         setTreeChildren(activeSessionId, backend, normalizedPath, entries);
         setChildrenCache((prev) => {
@@ -1328,6 +1339,7 @@ function FileExplorerPane({
         }
         return true;
       } catch (e) {
+        if (!isCurrentRequest()) return false;
         if (options?.silent) {
           return false;
         }
@@ -1339,7 +1351,7 @@ function FileExplorerPane({
         }
         return false;
       } finally {
-        if (expand) {
+        if (expand && isCurrentRequest()) {
           setLoadingDirPaths((prev) => {
             const next = new Set(prev);
             next.delete(normalizedPath);
@@ -1361,6 +1373,11 @@ function FileExplorerPane({
     ) => {
       if (!canBrowseFiles || !activeSessionId) return false;
       const backend = explorerBackendRef.current;
+      const requestSessionId = activeSessionId;
+      const isCurrentRequest = () =>
+        activeSessionIdRef.current === requestSessionId &&
+        explorerBackendRef.current === backend;
+      if (!isCurrentRequest()) return false;
       const targetPath = normalizeExplorerPath(rawPath, backend);
       if (!targetPath) return false;
       const token = ++revealTokenRef.current;
@@ -1373,6 +1390,7 @@ function FileExplorerPane({
       });
       if (!resolvedRoot) return false;
       const { rootPath, chain } = resolvedRoot;
+      if (!isCurrentRequest()) return false;
       if (rootPath !== normalizeExplorerPath(treeRootPathRef.current, backend)) {
         setTreeRootPath(rootPath);
         treeRootPathRef.current = rootPath;
@@ -1390,10 +1408,16 @@ function FileExplorerPane({
           });
           if (!loaded) return false;
         }
-        if (token !== revealTokenRef.current) return false;
+        if (
+          token !== revealTokenRef.current ||
+          !isCurrentRequest()
+        ) {
+          return false;
+        }
       }
 
       const chainDirs = chain;
+      if (!isCurrentRequest()) return false;
       setExpandedPaths((prev) => {
         if (options?.collapseOthers) {
           return collapseToAncestors(chainDirs);
@@ -1413,6 +1437,7 @@ function FileExplorerPane({
         visitedHistoryRef.current = nextVisitedHistory;
         setVisitedHistory(nextVisitedHistory);
       }
+      if (!isCurrentRequest()) return false;
       currentPathRef.current = targetPath;
       setCurrentPath(targetPath);
       setHighlightPath(options?.highlight === false ? null : targetPath);
@@ -1748,31 +1773,37 @@ function FileExplorerPane({
     homeDirRef.current = "";
 
     let cancelled = false;
+    const backend = explorerBackendRef.current;
+    const isCurrentSession = () =>
+      !cancelled &&
+      activeSessionIdRef.current === activeSessionId &&
+      explorerBackendRef.current === backend;
     (async () => {
       const adoptTreeRoot = async (rootPath: string) => {
+        if (!isCurrentSession()) return false;
         setTreeRootPath(rootPath);
         treeRootPathRef.current = rootPath;
         currentPathRef.current = rootPath;
         setCurrentPath(rootPath);
         setDirectoryLoading(true);
         const loaded = await loadTreeChildren(rootPath);
-        if (!cancelled) {
+        if (isCurrentSession()) {
           setDirectoryLoading(false);
         }
-        return loaded;
+        return isCurrentSession() && loaded;
       };
 
       const loadRootDirectory = async () => {
-        if (cancelled) return;
+        if (!isCurrentSession()) return;
         homeDirRef.current = "";
         setHomeDir("");
         await adoptTreeRoot("/");
       };
 
-      const backend = explorerBackendRef.current;
       // Root the tree at the filesystem top so every level is reachable;
       // the home directory is kept for the path bar and favorites.
       const adoptHomeAsTreeRoot = async (home: string) => {
+        if (!isCurrentSession()) return false;
         homeDirRef.current = home;
         setHomeDir(home);
         return adoptTreeRoot(getFilesystemTop(home, backend));
@@ -1794,7 +1825,7 @@ function FileExplorerPane({
           ),
           backend,
         );
-        if (cancelled) return;
+        if (!isCurrentSession()) return;
         if (home) {
           const loaded = await adoptHomeAsTreeRoot(home);
           if (cancelled || loaded) {
@@ -3618,7 +3649,7 @@ function FileExplorerPane({
           <div className="relative min-h-0 flex-1">
             {isExternalDropActive && canBrowseFiles && (
               <ExternalFileDropOverlay
-                insetClassName="inset-3"
+                insetClassName="top-3 right-3 left-auto w-fit max-w-[calc(100%-1.5rem)]"
                 title={t("fileExplorer.externalDropOverlayTitle")}
                 hint={
                   externalDropDirPath
