@@ -134,7 +134,7 @@ impl ChildWindowStateKey {
     fn default_size(self) -> (f64, f64) {
         match self {
             Self::Settings => (800.0, 560.0),
-            Self::NewSession => (520.0, 620.0),
+            Self::NewSession => (920.0, 780.0),
             Self::QuickCommand => (540.0, 640.0),
             Self::Proxy => (520.0, 560.0),
             Self::Tunnel => (680.0, 640.0),

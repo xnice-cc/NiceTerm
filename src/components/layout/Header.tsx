@@ -884,11 +884,6 @@ export default function Header({
 
   const menuKeys = [
     { key: "file", label: t("menu.file"), directAction: undefined },
-    {
-      key: "savedConnections",
-      label: t("menu.savedConnections"),
-      directAction: onOpenSavedConnections,
-    },
     { key: "view", label: t("menu.view"), directAction: undefined },
     { key: "terminal", label: t("menu.terminal"), directAction: undefined },
   ];
@@ -1316,11 +1311,6 @@ export default function Header({
         id: "file",
         label: t("menu.file"),
         items: convertMenuItemsForMacos(menus.file),
-      },
-      {
-        id: "savedConnections",
-        label: t("menu.savedConnections"),
-        items: convertMenuItemsForMacos(menus.savedConnections),
       },
       {
         id: "edit",
@@ -1843,23 +1833,16 @@ export default function Header({
 
         {!isMacOS && (
           <Menubar className="border-none bg-transparent h-auto p-0 gap-1 shadow-none">
-            {menuKeys.map(({ key, label, directAction }) => (
+            {menuKeys.map(({ key, label }) => (
               <MenubarMenu key={key}>
                 <MenubarTrigger
-                  onClick={(event) => {
-                    if (!directAction) return;
-                    event.preventDefault();
-                    directAction();
-                  }}
                   className="relative cursor-default px-2.5 py-1 text-xs font-medium rounded-md transition-colors text-[var(--df-text-muted)] data-[state=open]:text-[var(--df-primary)] data-[state=open]:bg-[color-mix(in_srgb,var(--df-primary)_10%,transparent)] hover:bg-[color-mix(in_srgb,var(--df-text-muted)_10%,transparent)] focus:bg-[color-mix(in_srgb,var(--df-text-muted)_10%,transparent)] focus:text-[var(--df-text-muted)] data-[state=open]:focus:bg-[color-mix(in_srgb,var(--df-primary)_10%,transparent)] data-[state=open]:focus:text-[var(--df-primary)] outline-none"
                 >
                   {label}
                 </MenubarTrigger>
-                {!directAction && (
-                  <MenubarContent align="start" className="min-w-[180px]">
-                    {menus[key].map((item, idx) => renderMenuItem(item, idx))}
-                  </MenubarContent>
-                )}
+                <MenubarContent align="start" className="min-w-[180px]">
+                  {menus[key].map((item, idx) => renderMenuItem(item, idx))}
+                </MenubarContent>
               </MenubarMenu>
             ))}
           </Menubar>

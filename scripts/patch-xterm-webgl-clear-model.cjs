@@ -43,7 +43,7 @@ const TARGETS = [
     file: path.join(PACKAGE_DIR, "lib", "addon-webgl.mjs"),
     // @xterm/addon-webgl@0.20.0-beta.287 ESM bundle
     loop:
-      "for(let c=0;c<e0.length;c++){let u=e0[c],C=u.ownedBy.indexOf(i);if(C>=0){if(Ee(u.config,h))return u.atlas;u.ownedBy.length===1?(e0.splice(c,1),u.atlas.dispose()):u.ownedBy.splice(C,1)}}",
+      "for(let c=0;c<e0.length;c++){let u=e0[c],C=u.ownedBy.indexOf(i);if(C>=0){if(Ee(u.config,h))return u.atlas;u.ownedBy.length===1?(u.atlas.dispose(),e0.splice(c,1)):u.ownedBy.splice(C,1);break}}",
   },
   {
     file: path.join(PACKAGE_DIR, "lib", "addon-webgl.js"),

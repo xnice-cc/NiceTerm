@@ -121,7 +121,6 @@ export default function SettingsPage() {
     useSettingsDraftState<AppSettings>(committedSettings);
   const [isSaving, setIsSaving] = useState(false);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
-
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollStates = useRef<Record<string, number>>({});
   const forceCloseRef = useRef(false);

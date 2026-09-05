@@ -1120,23 +1120,23 @@ export default function NewSessionPage() {
         className="flex-1 min-h-0 flex flex-col overflow-hidden"
       >
         <div className="shrink-0 px-4 pt-3 sm:px-5">
-          <TabsList className="grid h-8 w-full grid-cols-6 pointer-events-auto">
-            <TabsTrigger value="ssh" className="text-xs">
+          <TabsList className="grid h-auto min-h-8 w-full grid-cols-3 pointer-events-auto sm:grid-cols-6">
+            <TabsTrigger value="ssh" className="min-w-0 text-xs">
               SSH
             </TabsTrigger>
-            <TabsTrigger value="local" className="text-xs">
+            <TabsTrigger value="local" className="min-w-0 text-xs">
               {t("dialog.localTerminal")}
             </TabsTrigger>
-            <TabsTrigger value="telnet" className="text-xs">
+            <TabsTrigger value="telnet" className="min-w-0 text-xs">
               Telnet
             </TabsTrigger>
-            <TabsTrigger value="serial" className="text-xs">
+            <TabsTrigger value="serial" className="min-w-0 text-xs">
               {t("dialog.serial")}
             </TabsTrigger>
-            <TabsTrigger value="rdp" className="text-xs">
+            <TabsTrigger value="rdp" className="min-w-0 text-xs">
               RDP
             </TabsTrigger>
-            <TabsTrigger value="vnc" className="text-xs">
+            <TabsTrigger value="vnc" className="min-w-0 text-xs">
               VNC
             </TabsTrigger>
           </TabsList>

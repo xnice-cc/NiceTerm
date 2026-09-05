@@ -251,6 +251,8 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
   const loaded = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [savedConnections, setSavedConnections] = useState<SavedConnection[]>([]);
+  const [savedGroups, setSavedGroups] = useState<Group[]>([]);
   const { isLocked, setIsLocked, lockStateLoaded } = useAppLockState();
 
   const loadAppSettings = useCallback(() => {
@@ -274,9 +276,23 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
       });
   }, []);
 
+  const refreshConnections = useCallback(async () => {
+    try {
+      const [connections, groups] = await Promise.all([
+        invoke<SavedConnection[]>("get_saved_connections"),
+        invoke<Group[]>("get_groups"),
+      ]);
+      setSavedConnections(connections);
+      setSavedGroups(groups);
+    } catch (error) {
+      logger.error({ domain: "ui.error", event: "connections.fetch_failed", message: "Failed to fetch connections", error });
+    }
+  }, []);
+
   useEffect(() => {
     loadAppSettings();
-  }, [loadAppSettings]);
+    void refreshConnections();
+  }, [loadAppSettings, refreshConnections]);
 
   useEffect(() => {
     const unlisten = listen("settings-changed", () => {
@@ -290,10 +306,11 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    getCurrentWindow()
+      getCurrentWindow()
       .onFocusChanged((event) => {
         if (event.payload) {
           loadAppSettings();
+          void refreshConnections();
         }
       })
       .then((dispose) => {
@@ -303,7 +320,7 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
     return () => {
       unlisten?.();
     };
-  }, [loadAppSettings]);
+  }, [loadAppSettings, refreshConnections]);
 
   useEffect(() => {
     document.documentElement.style.fontSize = `${appSettings.appearance.ui_font_size}px`;
@@ -399,9 +416,6 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
   const noopAsync = useCallback(async () => {}, []);
   const noopSplitPane = useCallback(() => null, []);
 
-  const emptyConnections = useMemo(() => [] as SavedConnection[], []);
-  const emptyGroups = useMemo(() => [] as Group[], []);
-
   const contextValue = useMemo(
     () => ({
       tabs: [] as never[],
@@ -431,9 +445,9 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
       updateAppSettings,
       replaceAppSettings,
       updateUi,
-      savedConnections: emptyConnections,
-      savedGroups: emptyGroups,
-      refreshConnections: noopAsync,
+      savedConnections,
+      savedGroups,
+      refreshConnections,
       recordRecentConnection: noop,
       showNewSession: false,
       setShowNewSession: noop,
@@ -460,8 +474,9 @@ export function ChildAppProvider({ children }: { children: ReactNode }) {
       noopBoolean,
       noopAsync,
       noopSplitPane,
-      emptyConnections,
-      emptyGroups,
+      savedConnections,
+      savedGroups,
+      refreshConnections,
       appSettings,
       updateAppSettings,
       replaceAppSettings,

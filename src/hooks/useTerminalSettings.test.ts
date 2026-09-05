@@ -220,4 +220,25 @@ describe("useTerminalSettings renderer refresh", () => {
     flushAnimationFrames();
     expect(harness.terminal.clearTextureAtlas).toHaveBeenCalledTimes(1);
   });
+
+  it("applies font-size changes to hidden terminal tabs", () => {
+    const harness = createHookHarness(false);
+    flushAnimationFrames();
+    vi.mocked(harness.fitSchedulerRef.current!.schedule).mockClear();
+
+    harness.rerender({
+      visible: false,
+      colors: theme("#000000"),
+      ui: appearance(17),
+    });
+    flushAnimationFrames();
+
+    expect(harness.terminal.options.fontSize).toBe(17);
+    expect(harness.fitSchedulerRef.current?.schedule).toHaveBeenCalledWith({
+      reason: "appearance",
+      force: true,
+      refresh: true,
+      clearTextureAtlas: true,
+    });
+  });
 });

@@ -410,7 +410,6 @@ export default function AppLayout({
       <div className="relative z-10 flex h-full min-h-0 flex-col">
         <Header
           {...header}
-          onOpenSavedConnections={() => setShowSavedConnections((visible) => !visible)}
           tabsSlot={headerTabs}
           onToggleLeft={() => {
             setShowSavedConnections(false);

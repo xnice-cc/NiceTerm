@@ -1489,11 +1489,22 @@ fn decide_remote_check(
     if remote.payload_hash == local_hash {
         return RemoteCheckDecision::UpToDate;
     }
-    let _ = state;
-    if allow_auto_pull {
-        RemoteCheckDecision::AutoPull
-    } else {
-        RemoteCheckDecision::RemoteAvailable
+
+    let local_changed = state
+        .last_synced_payload_hash
+        .as_deref()
+        .map_or(true, |hash| hash != local_hash);
+    let remote_changed = state
+        .last_applied_remote_revision
+        .as_deref()
+        .map_or(true, |revision| revision != remote.revision_id);
+
+    match (remote_changed, local_changed, allow_auto_pull) {
+        (true, true, _) => RemoteCheckDecision::Conflict,
+        (true, false, true) => RemoteCheckDecision::AutoPull,
+        (true, false, false) => RemoteCheckDecision::RemoteAvailable,
+        (false, true, _) => RemoteCheckDecision::LocalChanged,
+        (false, false, _) => RemoteCheckDecision::UpToDate,
     }
 }
 
@@ -1707,24 +1718,24 @@ mod tests {
     }
 
     #[test]
-    fn remote_check_uses_remote_payload_when_hashes_differ() {
+    fn remote_check_decides_local_changed_when_only_local_changed() {
         let state = synced_state("r1", "hash-1");
         let remote = remote_pointer("r1", "hash-remote");
 
         assert_eq!(
             decide_remote_check(&state, "hash-local", &remote, true),
-            RemoteCheckDecision::AutoPull
+            RemoteCheckDecision::LocalChanged
         );
     }
 
     #[test]
-    fn remote_check_does_not_compare_revision_or_local_node_state() {
+    fn remote_check_decides_conflict_when_local_and_remote_changed() {
         let state = synced_state("r1", "hash-1");
         let remote = remote_pointer("r2", "hash-2");
 
         assert_eq!(
             decide_remote_check(&state, "hash-local", &remote, true),
-            RemoteCheckDecision::AutoPull
+            RemoteCheckDecision::Conflict
         );
     }
 

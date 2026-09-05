@@ -807,8 +807,8 @@ export async function openSettings(tab?: string) {
     title: i18n.t("settings.title"),
     url,
     parentLabel: ownerMainWindowLabel,
-    width: 800,
-    height: 560,
+    width: 1180,
+    height: 820,
     stateKey: "settings",
   });
   if (tab) {
@@ -859,8 +859,8 @@ export function openNewSessionWithTarget(
     title: i18n.t(editId ? "dialog.editConnection" : "dialog.newConnection"),
     url,
     parentLabel: ownerMainWindowLabel,
-    width: 520,
-    height: 620,
+    width: 920,
+    height: 780,
     stateKey: "new-session",
   });
 }

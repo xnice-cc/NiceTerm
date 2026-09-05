@@ -1866,7 +1866,7 @@ function FileExplorerPane({
     }
 
     const visibleCurrentPath = currentPathRef.current;
-    if (!canBrowseFiles || !visibleCurrentPath) {
+    if (!canBrowseFiles) {
       return;
     }
 
